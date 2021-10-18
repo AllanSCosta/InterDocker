@@ -141,34 +141,35 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         new_idx = random.randint(0, len(self)-1)
-
         seqs = self.seqs[idx]
         num_nodes = len(seqs)
 
         chains = torch.LongTensor(self.chns[idx])
         chains = rearrange(chains, '(r a) -> r a', a=14)[:, 1]
+        if random.random() < 0.5: chains = (chains + 1) % 2
+        chains = chains.float() + 1
 
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
-        tgt_crds = crds.clone()
+        rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
-        subunit0 = crds[chains == 0] - crds[chains == 0].mean(dim=-3)
-        crds[chains == 0] = torch.einsum('b a p, p q -> b a q', subunit0, random_rotation().t())
+        tgt_crds = crds.clone()
+        backbone_coords = crds[:, 1, :]
+        distance_map = torch.cdist(backbone_coords, backbone_coords)
+
+        edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
+
+        v, u = edge_index
+        edge_vectors = torch.einsum('b p, b p q -> b q', backbone_coords[u] - backbone_coords[v],
+                                                         rots[v].transpose(-1, -2))
+        edge_angles = F.normalize(edge_vectors, dim=-1)
 
         subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
         crds[chains == 1] = torch.einsum('b a p, p q -> b a q', subunit1, random_rotation().t())
 
-        rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
-
-        edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
-
+        subunit2 = crds[chains == 2] - crds[chains == 2].mean(dim=-3)
+        crds[chains == 2] = torch.einsum('b a p, p q -> b a q', subunit2, random_rotation().t())
+        crds[chains == 2] = crds[chains == 2] # + torch.FloatTensor([50, 50, 50])[None, :]
         backbone_coords = crds[:, 1, :]
-        distance_map = torch.cdist(backbone_coords, backbone_coords)
-        backbone_coords = backbone_coords - backbone_coords.mean(dim=-2)
-
-        v, u = edge_index
-        edge_vectors = torch.einsum('b p, b p q -> b q', backbone_coords[u] - backbone_coords[v],
-                                                                rots[v].transpose(-1, -2))
-        edge_angles = F.normalize(edge_vectors, dim=-1)
 
         datum = Data(
             __num_nodes__=len(seqs),
@@ -185,7 +186,6 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             edge_distance=distance_map[v, u],
             edge_vectors=edge_vectors,
             edge_angles=edge_angles
-
         )
 
         datum = deepcopy(datum)

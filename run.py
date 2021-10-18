@@ -39,15 +39,16 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset_source', type=str, default='../data')
     parser.add_argument('--downsample', type=float, default=1.0)
-    parser.add_argument('--max_seq_len', type=int, default=320) # O(s^2) mem
+    parser.add_argument('--seq_clamp', type=int, default=128) # O(s^2) mem
+    parser.add_argument('--max_seq_len', type=int, default=312) # O(s^2) mem
     parser.add_argument('--num_workers', type=int, default=10)
-    parser.add_argument('--batch_size', type=int, default=15)
+    parser.add_argument('--batch_size', type=int, default=30)
 
     # ========================
     # ARCHITECTURE
     # ========================
-    parser.add_argument('--distance_number_of_bins', type=int, default=16)
-    parser.add_argument('--distance_max_radius', type=int, default=24)
+    parser.add_argument('--distance_number_of_bins', type=int, default=32)
+    parser.add_argument('--distance_max_radius', type=int, default=22)
     parser.add_argument('--angle_number_of_bins', type=int, default=16)
     parser.add_argument('--gaussian_noise', type=float, default=0)
 
@@ -55,20 +56,21 @@ if __name__ == '__main__':
     parser.add_argument('--dim', type=int, default=128)
     parser.add_argument('--edim', type=int, default=32)
 
-    parser.add_argument('--encoder_depth',type=int, default=1)
-    parser.add_argument('--cross_encoder_depth',type=int, default=30)
+    parser.add_argument('--encoder_depth',type=int, default=4)
+    parser.add_argument('--cross_encoder_depth', type=int, default=15)
 
-    parser.add_argument('--heads',type=int, default=4) # O(h) mem
-    parser.add_argument('--scalar_key_dim',type=int, default=32)
-    parser.add_argument('--scalar_value_dim',type=int, default=32)
+    parser.add_argument('--heads',type=int, default=8) # O(h) mem
+    parser.add_argument('--scalar_key_dim',type=int, default=16)
+    parser.add_argument('--scalar_value_dim',type=int, default=16)
     parser.add_argument('--point_key_dim', type=int, default=8)
     parser.add_argument('--point_value_dim', type=int, default=8)
 
 
     # ITERATION STEPS
-    parser.add_argument('--unroll_steps', type=int, default=0) # O(1) mem
-    parser.add_argument('--eval_steps', type=int, default=1)
+    parser.add_argument('--unroll_steps', type=int, default=3) # O(1) mem
+    parser.add_argument('--eval_steps', type=int, default=3)
 
+    parser.add_argument('--external_leak', type=int, default=0)
 
     # ========================
     # OPTIMIZATION
@@ -86,7 +88,7 @@ if __name__ == '__main__':
     parser.add_argument('--topography_loss_coeff', type=float, default=1.0)
     parser.add_argument('--arrangement_loss_coeff', type=float, default=1.0)
 
-    parser.add_argument('--max_epochs', type=int, default=10)
+    parser.add_argument('--max_epochs', type=int, default=100)
     parser.add_argument('--validation_check_rate', type=int, default=10)
     parser.add_argument('--validation_start', type=int, default=20)
 
@@ -104,7 +106,6 @@ if __name__ == '__main__':
         submit_script(os.path.realpath(__file__), os.getcwd(), config)
         exit()
 
-    if config.test_model != '-' or config.debug: config.downsample = 0.001
 
     if not config.debug:
         wandb.init(
@@ -119,10 +120,10 @@ if __name__ == '__main__':
     loaders['test'] = []
     for idx, datum in enumerate(loaders['DIPS']):
         loaders['test'].append(datum)
-        if idx >= 1: break
+        break
 
     if config.test_model != '-':
-        model = create_model(config)
+        model = Interactoformer(config)
         model.load_state_dict(torch.load(config.test_model))
         trainer = Trainer(config, model, loaders)
         trainer.test()

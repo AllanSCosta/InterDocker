@@ -19,6 +19,9 @@ from einops import repeat, rearrange
 eps = 1e-7
 
 
+def unit_circle_loss(rotations):
+    return (rotations.norm(dim=-1) - 1).pow(2).mean()
+
 class Trainer():
     def __init__(self, hparams, model, loaders):
         super().__init__()
@@ -85,7 +88,7 @@ class Trainer():
 
 
                     loss = metrics['loss'] = (
-                        self.config.topography_loss_coeff * metrics['dist_xentropy'] +
+                        # self.config.topography_loss_coeff * metrics['dist_xentropy']
                         self.config.arrangement_loss_coeff * metrics['fape']
                     )
 
@@ -123,11 +126,11 @@ class Trainer():
             metrics.update(topography_metrics)
 
         if ('translations' in predictions) and ('rotations' in predictions):
-            metrics['fape'] = fape_loss(batch, predictions['translations'], predictions['rotations'])
+            metrics['fape'] = fape_loss(batch, predictions['translations'], predictions['rotations'], max_val=20)
 
             if not is_training:
                 structural_metrics, alignments = self.evaluate_arrangement_predictions(
-                    batch, predictions['translations'],
+                    batch, predictions['translations'], is_training
                 )
                 metrics.update(structural_metrics)
 
@@ -137,16 +140,15 @@ class Trainer():
     def evaluate_topography_predictions(self, batch, distance_logits):
         metrics = defaultdict(int)
 
-        external_edges = rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()')
-        external_mask = batch.edge_pad_mask[external_edges]
+        external_edges = (rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()'))
+        external_edges &= batch.edge_pad_mask
 
-        distance_logits = distance_logits[external_mask].squeeze()
-        distance_ground = batch.edge_distance[external_edges][external_mask]
+        distance_ground = batch.edge_distance[external_edges]
         distance_labels = self.distance_binner(distance_ground)
 
         metrics[f'dist_xentropy'] = F.cross_entropy(
-            distance_logits[batch.edge_record_mask[external_edges][external_mask]],
-            distance_labels[batch.edge_record_mask[external_edges][external_mask]]
+            distance_logits[batch.edge_record_mask[external_edges]],
+            distance_labels[batch.edge_record_mask[external_edges]]
         )
         metrics[f'dist_acc'] = (distance_logits.argmax(-1) == distance_labels).float().mean()
 
@@ -158,17 +160,17 @@ class Trainer():
         pred_contacts = expectation < self.config.contact_cut
         ground_contacts = distance_ground < self.config.contact_cut
 
-        true_positives = pred_contacts[ground_contacts].sum()
-        false_positives = pred_contacts[~ground_contacts].sum()
-        false_negatives = ~pred_contacts[~ground_contacts].sum()
+        true_positives  = (pred_contacts & ground_contacts).sum()
+        false_positives = (pred_contacts & ~ground_contacts).sum()
+        false_negatives = (~pred_contacts & ground_contacts).sum()
 
         metrics[f'contact_precision'] = true_positives / (true_positives + false_positives + eps)
-        metrics[f'contact_recall'] = true_positives / (true_positives + false_negatives + eps)
+        metrics[f'contact_recall'] =    true_positives / (true_positives + false_negatives + eps)
 
         batch_images = dict()
         batch_size, seq_len, _ = batch.edge_record_mask.size()
         edge_batches = repeat(torch.arange(0, batch_size), 'b -> b s z', s=seq_len, z=seq_len)
-        edge_batches = edge_batches[external_edges][external_mask]
+        edge_batches = edge_batches[external_edges]
 
         for batch_idx, id in enumerate(batch.ids):
             batch_filter = edge_batches == batch_idx
@@ -177,14 +179,14 @@ class Trainer():
             images = [img[:int(len(img)/2)] for img in images]
 
             chains = batch.chns[batch.node_pad_mask][batch.batch == batch_idx]
-            n, m = chains.sum(), len(chains) - chains.sum()
-            images = [rearrange(img, '(m n) -> n m', n=n, m=m).cpu() for img in images]
+            n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
+            images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
             batch_images[id] = images
 
         return metrics, batch_images
 
 
-    def evaluate_arrangement_predictions(self, batch, traj):
+    def evaluate_arrangement_predictions(self, batch, traj, is_training):
         node_mask = batch.node_pad_mask & batch.node_record_mask
         traj = rearrange(traj, 'b n t e -> b t n e')
         batch_size, trajectory_len, _, _ = traj.size()
@@ -199,15 +201,15 @@ class Trainer():
             for step, pred_wrap in enumerate(pred_traj):
                 pred_wrap = pred_wrap[mask]
 
-                # for computing internal aligment
-                # for chain in (0, 1):
-                #     chain_alignment_metrics, _ = get_alignment_metrics(
-                #         deepcopy(gnd_wrap)[chains == chain],
-                #         pred_wrap[chains == chain],
-                #     )
-                #
-                #     for k, metric in chain_alignment_metrics.items():
-                #         metrics[f'internal_{k}'] += metric.mean() / trajectory_len / batch_size / 2
+                if False:
+                    for chain in (1, 2):
+                        chain_alignment_metrics, _ = get_alignment_metrics(
+                            deepcopy(gnd_wrap)[chains == chain],
+                            pred_wrap[chains == chain],
+                        )
+
+                        for k, metric in chain_alignment_metrics.items():
+                            metrics[f'internal_{k}'] += metric.mean() / trajectory_len / batch_size / 2
 
                 alignment_metrics, (align_gnd_coors, align_pred_coors) = get_alignment_metrics(
                     deepcopy(gnd_wrap),
@@ -221,6 +223,10 @@ class Trainer():
 
                 for k, metric in alignment_metrics.items():
                     metrics[k] += metric.mean() / trajectory_len / batch_size
+
+            if trajectory_len > 1 and step == trajectory_len -1:
+                for k, metric in alignment_metrics.items():
+                    metrics[f'final_{k}'] += metric.mean() / batch_size
 
         return metrics, alignments
 
@@ -242,7 +248,7 @@ class Trainer():
             timeseries_fig = plot_aligned_timeseries(
                 sequence,
                 timeseries['trajectory'],
-                len(chain) - chain.sum().item()
+                (chain == chain[0]).sum().item()
             )
 
             if wandb.run: wandb.log({ f'{id} timeseries': wandb.Html(timeseries_fig._make_html()) })

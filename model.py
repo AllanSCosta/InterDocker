@@ -3,134 +3,15 @@ from torch import nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
+from torch_geometric.nn import global_mean_pool
 from einops import rearrange, repeat
 from torch import einsum
 from functools import partial
 from invariant_point_attention import InvariantPointAttention, IPABlock
 
-from utils import soft_one_hot_linspace, angle_to_point_in_circum, rotation_6d_to_matrix
+from utils import soft_one_hot_linspace, angle_to_point_in_circum
 
-
-class Encoder(nn.Module):
-    def __init__(
-            self,
-            dim,
-            edim,
-            heads,
-            scalar_key_dim = 16,
-            scalar_value_dim = 16,
-            point_key_dim = 4,
-            point_value_dim = 4,
-            depth=30
-        ):
-        super().__init__()
-
-        self.layers = nn.ModuleList([
-            IPABlock(
-                dim = 64,
-                pairwise_repr_dim=32,
-                heads = 4,
-                scalar_key_dim = 16,
-                scalar_value_dim = 16,
-                point_key_dim = 4,
-                point_value_dim = 4
-            )
-            for _ in range(depth)
-        ])
-
-    def block_checkpoint(self, layers):
-        def checkpoint_forward(x):
-            return layers(x)
-        return checkpoint_forward
-
-    def forward(self, nodes, edges, coors, rotations, mask):
-        for layer in self.layers:
-            nodes = layer(
-                nodes,
-                pairwise_repr = edges,
-                rotations = rotations,
-                translations = coors,
-                mask = mask
-            )
-        return nodes
-
-
-
-class CrossEncoder(nn.Module):
-    def __init__(self,
-            dim,
-            edim,
-            heads,
-            scalar_key_dim = 16,
-            scalar_value_dim = 16,
-            point_key_dim = 4,
-            point_value_dim = 4,
-            depth=30
-        ):
-        super().__init__()
-
-        self.layers = nn.ModuleList([
-            nn.ModuleList([IPABlock(
-                dim = dim,
-                pairwise_repr_dim=edim,
-                heads = heads,
-                scalar_key_dim = scalar_key_dim,
-                scalar_value_dim = scalar_value_dim,
-                point_key_dim = point_key_dim,
-                point_value_dim = point_value_dim
-            ),
-            nn.Linear(dim, 9)])
-            for _ in range(depth)
-        ])
-
-    def block_checkpoint(self, layers):
-        def checkpoint_forward(x):
-            return layers(x)
-        return checkpoint_forward
-
-    def forward(self, nodes, edges, coors, rotations, mask):
-        trajectory_crds, trajectory_rots  = [], []
-        for (layer, to_step) in self.layers:
-            nodes = layer(
-                nodes,
-                pairwise_repr = edges,
-                rotations = rotations,
-                translations = coors,
-                mask = mask
-            )
-
-            update = to_step(nodes)
-            rotation_update, translation_update = update[..., :6], update[..., 6:]
-            rotation_update = rotation_6d_to_matrix(rotation_update)
-
-            coors = coors + einsum('b n c, b n c r -> b n r', translation_update, rotations)
-            rotations = rotation_update @ rotations
-
-            trajectory_crds.append(coors)
-            trajectory_rots.append(rotations)
-            rotations = rotations.detach()
-
-        return nodes, trajectory_crds, trajectory_rots
-
-
-class Dense(nn.Module):
-    def __init__(self, layer_structure, checkpoint=False):
-        super().__init__()
-        layers = []
-        for idx, (back, front) in enumerate(zip(layer_structure[:-1],
-                                            layer_structure[1:])):
-            layers.append(nn.Linear(back, front))
-            if idx < len(layer_structure) - 2: layers.append(nn.LeakyReLU())
-        self.layers = nn.Sequential(*layers)
-        self.checkpoint = checkpoint
-
-    def block_checkpoint(self, layers):
-        def checkpoint_forward(x):
-            return layers(x)
-        return checkpoint_forward
-
-    def forward(self, x):
-        return checkpoint.checkpoint(self.block_checkpoint(self.layers), x) if self.checkpoint else self.layers(x)
+from pytorch3d.transforms import euler_angles_to_matrix, matrix_to_euler_angles, rotation_6d_to_matrix
 
 
 class Interactoformer(nn.Module):
@@ -150,110 +31,105 @@ class Interactoformer(nn.Module):
         self.sidechain_dihedrals_emb = Dense([6 * 12, 64, 32])
         self.dihedral_emb = Dense([64, 64, config.dim])
 
-        self.encoder = Encoder(
-            config.dim,
-            config.edim,
-            config.heads,
-            scalar_key_dim = config.scalar_key_dim,
-            scalar_value_dim = config.scalar_value_dim,
-            point_key_dim = config.point_key_dim,
-            point_value_dim = config.point_value_dim,
-            depth=config.encoder_depth
-        )
-
-        self.cross_encoder = CrossEncoder(
-            config.dim,
-            config.edim,
-            config.heads,
-            scalar_key_dim = config.scalar_key_dim,
-            scalar_value_dim = config.scalar_value_dim,
-            point_key_dim = config.point_key_dim,
-            point_value_dim = config.point_value_dim,
-            depth=config.cross_encoder_depth
-        )
+        self.encoder = Encoder(config)
+        self.cross_encoder = CrossEncoder(config)
 
         self.to_distance = Dense([config.edim, config.edim, config.distance_pred_number_of_bins])
-        self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins])
-        self.to_position = Dense([config.dim, config.dim, 3])
 
         self.gaussian_noise = config.gaussian_noise
         self.unroll_steps = config.unroll_steps
 
-        self.edge_norm_enc = partial(soft_one_hot_linspace, start=0,
+        self.edge_norm_enc = partial(soft_one_hot_linspace, start=2,
                     end=config.distance_max_radius, number=config.distance_number_of_bins, basis='gaussian', cutoff=True)
         self.edge_angle_enc = partial(soft_one_hot_linspace, start=-1,
                     end=1, number=config.angle_number_of_bins, basis='gaussian', cutoff=True)
 
         edge_enc_size = config.distance_number_of_bins + 3 * config.angle_number_of_bins
         self.to_internal_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
-        self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim])
+
+        self.external_leak = config.external_leak
+        if self.external_leak:
+            self.to_external_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
+        else:
+            self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim])
+
+        self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins])
+        self.to_position = Dense([config.dim, config.dim, 3])
+
 
         self.unroll_steps = config.unroll_steps
         self.eval_steps = config.eval_steps
 
 
+
     def forward(self, batch, is_training):
         output = {}
 
+        # utils
         node_pad_mask = batch.node_pad_mask
         edge_pad_mask = batch.edge_pad_mask
         batch_size, seq_len = batch.seqs.size()
+        device = batch.seqs.device
 
-        internal_edge_mask = rearrange(batch.chns, 'b s -> b () s') == rearrange(batch.chns, 'b s -> b s ()')
-        external_edge_mask = ~internal_edge_mask
-
-        # produce distance and angular signal for pairwise representations
-        dist_signal = soft_one_hot_linspace(batch.edge_distance, start=2, end=30,
-                    number=self.config.distance_number_of_bins, basis='gaussian', cutoff=True)
-
-        angle_signal = soft_one_hot_linspace(batch.edge_angles, start=-1, end=1,
-                    number=self.config.angle_number_of_bins, basis='gaussian', cutoff=True)
-        angle_signal = rearrange(angle_signal, 'b s z a c -> b s z (a c)')
-
-        edges = self.to_internal_edge(torch.cat((dist_signal, angle_signal), dim=-1))
-
-
-        # experimental ---------------> folding start
-
-        # (a) noised ground truth; useful for testing the module
-        # coors = batch.tgt_crds[:, :, 1, :].clone() + torch.normal(0, 3, batch.tgt_crds[:, :, 1, :].shape, device=batch.tgt_crds[:, :, 1, :].device)
-
-        # (b) hold one protein in place, start the other from the origin
-        # coors = batch.bck_crds.clone()
-        # rots = batch.rots
-        #
-        # coors[batch.chns == 1] = 0
-        # rots[batch.chns == 1] = repeat(torch.eye(3), '... -> b ...', b = rots[batch.chns == 1].size(0)).to(batch.rots.device)
-
-        # (c) hold the two proteins in place
-        # coors = batch.bck_crds.clone()
-        # rots = batch.rots
-
-        # (d) start both from origin ('black-hole start')
-        coors = torch.zeros_like(batch.bck_crds, device=batch.bck_crds.device)
-        rots = repeat(torch.eye(3), '... -> b n ...', b = batch_size, n = seq_len).to(batch.rots.device)
-
-        # ----------------------------------
-
-        # embed node information
+        # embed individual node information
         nodes = self.node_token_emb(batch.seqs)
+
         angles = self.circum_emb(angle_to_point_in_circum(batch.angs))
 
         bb_dihedrals = rearrange(angles[..., :6, :], 'b s a h -> b s (a h)')
-        sc_dihedrals = rearrange(angles[..., 6:, :], 'b s a h -> b s (a h)')
-
         bb_dihedrals = self.backbone_dihedrals_emb(bb_dihedrals)
+        sc_dihedrals = rearrange(angles[..., 6:, :], 'b s a h -> b s (a h)')
         sc_dihedrals = self.sidechain_dihedrals_emb(sc_dihedrals)
 
         dihedrals = self.dihedral_emb(torch.cat((bb_dihedrals, sc_dihedrals), dim=-1))
 
         nodes = nodes + dihedrals
 
+        # produce distance and angular signal for pairwise internal representations
+        edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=device)
+        internal_edge_mask = rearrange(batch.chns, 'b s -> b () s') == rearrange(batch.chns, 'b s -> b s ()')
+        internal_edge_mask =  internal_edge_mask & edge_pad_mask
+        external_edge_mask = ~internal_edge_mask & edge_pad_mask
 
-        # add noise to prevent dx=0 being a solution when we start from local solutions
-        coors = coors.clone().detach() + torch.normal(0, 1, coors.shape, device=coors.device)
+        max_radius = self.config.distance_max_radius
+        dist_signal = self.edge_norm_enc(batch.edge_distance)
+        angle_signal = self.edge_angle_enc(batch.edge_angles)
+        angle_signal = rearrange(angle_signal, 'b s z a c -> b s z (a c)')
+        angle_signal[batch.edge_distance < max_radius] = 0
 
-        # unroll network
+        edge_structural_signal = torch.cat((dist_signal, angle_signal), dim=-1)
+
+        edges[internal_edge_mask] = self.to_internal_edge(edge_structural_signal[internal_edge_mask])
+
+        # start from superposition
+        coors = batch.bck_crds.clone().detach()
+        rots = batch.rots
+
+        # encode chains independently
+        encodings_buf = torch.zeros_like(nodes, device=device)
+        for chain in (1, 2):
+            chain_mask = (node_pad_mask) & (batch.chns == chain)
+            chain_encoding = self.encoder(nodes, edges, coors, rots, mask=chain_mask)
+            encodings_buf[batch.chns == chain] = chain_encoding[batch.chns == chain]
+        nodes = nodes + encodings_buf
+
+        # produce pairwise external representations and compute distance
+        if not self.external_leak:
+            endpoints = repeat(nodes, 'b s c -> b z s c', z=seq_len), repeat(nodes, 'b s c -> b s z c', z=seq_len)
+            cross_cat = torch.cat(endpoints, dim=-1)
+            external_edges = self.to_external_edge(cross_cat)
+            output['distance_logits'] = self.to_distance(external_edges[external_edge_mask])
+        else:
+            external_edges = self.to_external_edge(edge_structural_signal)
+        edges = edges + external_edges * external_edge_mask[..., None]
+
+
+        # add gaussian noise if you're feeling like it
+        if self.gaussian_noise:
+            coors = coors + torch.normal(0, self.gaussian_noise, coors.shape, device=device)
+        rots, coors = rots.clone(), coors.clone()
+
+        # unroll network so we learn to refine ourselves
         if is_training and self.unroll_steps:
             batch_steps = torch.randint(0, self.unroll_steps, [batch_size])
             with torch.no_grad():
@@ -282,46 +158,143 @@ class Interactoformer(nn.Module):
         return output
 
 
-# This code will be re-integrated into forward() once our task is done
+class Encoder(nn.Module):
+    def __init__(
+            self,
+            config
+        ):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            IPABlock(
+                dim = config.dim,
+                pairwise_repr_dim = config.edim,
+                heads = config.heads,
+                scalar_key_dim = config.scalar_key_dim,
+                scalar_value_dim = config.scalar_value_dim,
+                point_key_dim = config.point_key_dim,
+                point_value_dim = config.point_value_dim,
+            )
+            for _ in range(config.encoder_depth)
+        ])
 
-# dist_signal = soft_one_hot_linspace(batch.edge_distance[internal_edge_mask], start=2, end=30,
-#             number=self.config.distance_number_of_bins, basis='gaussian', cutoff=True).detach()
-#
-# angle_signal = soft_one_hot_linspace(batch.edge_angles[internal_edge_mask], start=-1, end=1,
-#             number=self.config.angle_number_of_bins, basis='gaussian', cutoff=True)
-# angle_signal = rearrange(angle_signal, 'e a c -> e (a c)').detach()
-# edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=dist_signal.device)
+        self.checkpoint = config.checkpoint
 
-# internal_edges = self.to_internal_edge(torch.cat((dist_signal, angle_signal), dim=-1))
-# edges[internal_edge_mask] = internal_edges
+    def block_checkpoint(self, layer):
+        def checkpoint_forward(nodes, edges, coors, rotations, mask):
+            return layer(
+                nodes,
+                pairwise_repr = edges,
+                rotations = rotations,
+                translations = coors,
+                mask = mask
+            )
+        return checkpoint_forward
 
-# encodings = torch.zeros_like(nodes, device=nodes.device)
-# for chain in (0, 1):
-#     chain_mask = (node_pad_mask) & (batch.chns == chain)
-#     chain_encoding, _ = self.encoder(nodes=nodes, edges=edges, mask=chain_mask)
-#     encodings[batch.chns == chain] = chain_encoding[batch.chns == chain]
-#
-# endpoints = repeat(encodings, 'b s c -> b z s c', z=seq_len), repeat(encodings, 'b s c -> b s z c', z=seq_len)
-# cross_cat = torch.cat(endpoints, dim=-1)[external_edge_mask]
+    def forward(self, nodes, edges, coors, rotations, mask):
+        for layer in self.layers:
+            if self.checkpoint:
+                nodes = checkpoint.checkpoint(
+                    self.block_checkpoint(layer),
+                    nodes, edges, coors, rotations, mask
+                )
+            else:
+                nodes = layer(
+                    nodes,
+                    pairwise_repr = edges,
+                    rotations = rotations,
+                    translations = coors,
+                    mask = mask
+                )
+        return nodes
 
-# external_edges = self.to_external_edge(cross_cat)
-# self.node_crds_emb(coors)
 
-# coors[batch.chns == 1] = 0
+class CrossEncoder(nn.Module):
+    def __init__(self,
+            config
+        ):
+        super().__init__()
 
-# output['distance_logits'] = self.to_distance(external_edges)
-# dist_signal = soft_one_hot_linspace(batch.edge_distance[external_edge_mask], start=2, end=30,
-#             number=self.config.distance_number_of_bins, basis='gaussian', cutoff=True).detach()
-#
-# angle_signal = soft_one_hot_linspace(batch.edge_angles[external_edge_mask], start=-1, end=1,
-#             number=self.config.angle_number_of_bins, basis='gaussian', cutoff=True)
-# angle_signal = rearrange(angle_signal, 'e a c -> e (a c)').detach()
-#
-# edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=dist_signal.device)
-# external_edges = self.to_internal_edge(torch.cat((dist_signal, angle_signal), dim=-1))
-#
-# edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=dist_signal.device)
-# edges[internal_edge_mask] = internal_edges
-# edges[external_edge_mask] = external_edges
+        self.layers = nn.ModuleList([
+            nn.ModuleList([IPABlock(
+                dim = config.dim,
+                pairwise_repr_dim = config.edim,
+                heads = config.heads,
+                scalar_key_dim = config.scalar_key_dim,
+                scalar_value_dim = config.scalar_value_dim,
+                point_key_dim = config.point_key_dim,
+                point_value_dim = config.point_value_dim,
+            ),
+            nn.Linear(config.dim, 9)])
+            for _ in range(config.cross_encoder_depth)
+        ])
 
-# output['distance_logits'] = self.to_distance(edges[external_edge_mask])
+        self.checkpoint = config.checkpoint
+
+    def block_checkpoint(self, layer, to_step):
+        def checkpoint_forward(nodes, edges, coors, rotations, mask):
+            nodes = layer(
+                nodes,
+                pairwise_repr = edges,
+                rotations = rotations,
+                translations = coors,
+                mask = mask
+            )
+            batch_steps = to_step(nodes)
+            return nodes, batch_steps
+        return checkpoint_forward
+
+
+    def forward(self, nodes, edges, coors, rotations, mask):
+        trajectory_crds, trajectory_rots  = [], []
+        batch_index = repeat(torch.arange(0, len(nodes), device=nodes.device),
+                                            'd -> d p', p=nodes.size(1))[mask]
+
+        for (layer, to_step) in self.layers:
+            if self.checkpoint:
+                nodes, batch_steps = checkpoint.checkpoint(
+                    self.block_checkpoint(layer, to_step),
+                    nodes, edges, coors, rotations, mask
+                )
+            else:
+                nodes = layer(
+                    nodes,
+                    pairwise_repr = edges,
+                    rotations = rotations,
+                    translations = coors,
+                    mask = mask
+                )
+
+                batch_steps = to_step(nodes)
+
+            rot_update, crd_update = batch_steps[..., :6], batch_steps[..., 6:]
+            rot_update = rotation_6d_to_matrix(rot_update)
+            crd_update = einsum('b n c, b n c r -> b n r', crd_update, rotations)
+
+            coors = coors + crd_update
+            rotations = rotations @ rot_update
+
+            trajectory_crds.append(coors)
+            trajectory_rots.append(rotations)
+            rotations = rotations.detach()
+
+        return nodes, trajectory_crds, trajectory_rots
+
+
+class Dense(nn.Module):
+    def __init__(self, layer_structure, checkpoint=False):
+        super().__init__()
+        layers = []
+        for idx, (back, front) in enumerate(zip(layer_structure[:-1],
+                                            layer_structure[1:])):
+            layers.append(nn.Linear(back, front))
+            if idx < len(layer_structure) - 2: layers.append(nn.LeakyReLU())
+        self.layers = nn.Sequential(*layers)
+        self.checkpoint = checkpoint
+
+    def block_checkpoint(self, layers):
+        def checkpoint_forward(x):
+            return layers(x)
+        return checkpoint_forward
+
+    def forward(self, x):
+        return checkpoint.checkpoint(self.block_checkpoint(self.layers), x) if self.checkpoint else self.layers(x)

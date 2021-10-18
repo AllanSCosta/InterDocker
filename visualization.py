@@ -38,8 +38,8 @@ def plot_predictions(dist, pred_dist, conct, pred_conct):
     return fig
 
 
-gnd_colors = ('#43A047', '#7CB342')
-pred_colors = ('#673AB7', '#3F51B5')
+gnd_colors = ('#2196F3', '#EC407A')
+pred_colors = ('#2196F3', '#EC407A')
 
 def plot_aligned_structures(seq, gnd_crd, pred_crd, angs, boundary):
     pred_bb = ca_bb_fold(pred_crd.unsqueeze(0))[0]
@@ -75,27 +75,25 @@ def plot_aligned_structures(seq, gnd_crd, pred_crd, angs, boundary):
 
 def plot_aligned_timeseries(seq, timeseries, boundary):
     models = ""
-    view = py3Dmol.view(width=400, height=300)
+    view = py3Dmol.view(width=800, height=600)
     view.setBackgroundColor(0x000000,0)
 
     for i, (gnd_crd, pred_crd, angs) in enumerate(timeseries):
         pred_bb = ca_bb_fold(pred_crd.unsqueeze(0))[0]
         gnd_bb = ca_bb_fold(gnd_crd.unsqueeze(0))[0]
+        scaffolds = build_scaffolds_from_scn_angles(seq, angles=angs, device="cpu")
 
-        scaffolds = build_scaffolds_from_scn_angles(seq + seq, angles=torch.cat((angs, angs)), device="cpu")
-        coords, _ = sidechain_fold(wrapper = torch.cat((gnd_bb, pred_bb)).clone(), **scaffolds, c_beta = 'torsion')
-        structures = scn.StructureBuilder(seq + seq, coords.reshape(-1, 3))
+        gnd_coords, _ = sidechain_fold(wrapper = gnd_bb.clone(), **scaffolds, c_beta = 'torsion')
+        pred_coords, _ = sidechain_fold(wrapper = pred_bb.clone(), **scaffolds, c_beta = 'torsion')
 
-        pdb = structures.to_pdbstr()
-        models += "MODEL " + str(i) + "\n" + pdb + "ENDMDL\n"
+        structures = scn.StructureBuilder(seq + seq, torch.cat((gnd_coords, pred_coords), dim=0).reshape(-1, 3))
+        models += "MODEL " + str(i) + "\n" + structures.to_pdbstr() + "ENDMDL\n"
 
     view.addModelsAsFrames(models)
-
-    view.setStyle({'model': -1, 'resi': [f'0-{boundary}']}, {'cartoon': {'color': gnd_colors[0], 'opacity': 0.7}, 'stick': {'radius': .15, 'color': gnd_colors[0], 'opacity': 0.7}})
-    view.setStyle({'model': -1, 'resi': [f'{boundary}-{len(gnd_crd)-1}']}, {'cartoon': {'color': gnd_colors[1], 'opacity': 0.7}, 'stick': {'radius': .15, 'color': gnd_colors[1], 'opacity': 0.7}})
-    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd)}-{len(gnd_crd) + boundary - 1}']}, {'cartoon': {'color': pred_colors[0]}, 'stick': {'radius': .15, 'color': pred_colors[0]}})
-    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + boundary}-{ 2 * len(gnd_crd)}']}, {'cartoon': {'color': pred_colors[1]}, 'stick': {'radius': .15, 'color': pred_colors[1]}})
-
+    view.setStyle({'model': -1, 'resi': [f'1-{boundary}']}, {'cartoon': {'color': gnd_colors[0], 'opacity': 0.8} })
+    view.setStyle({'model': -1, 'resi': [f'{boundary + 1}-{len(gnd_crd)}']}, {'cartoon': {'color': gnd_colors[1], 'opacity': 0.8}})
+    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + 1}-{len(gnd_crd) + boundary}']}, {'cartoon': {'color': pred_colors[0]}, 'stick': {'radius': .15, 'color': pred_colors[0]}})
+    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + boundary + 1}-{2 * len(gnd_crd)}']}, {'cartoon': {'color': pred_colors[1]}, 'stick': {'radius': .15, 'color': pred_colors[1]}})
 
     view.zoomTo()
     view.animate({'loop': "forward"})
