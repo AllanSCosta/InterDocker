@@ -30,7 +30,6 @@ def disable_tf32():
 class InvariantPointAttention(nn.Module):
     def __init__(
         self,
-        *,
         dim,
         heads = 8,
         scalar_key_dim = 16,
@@ -92,7 +91,8 @@ class InvariantPointAttention(nn.Module):
         *,
         rotations,
         translations,
-        mask = None
+        mask = None,
+        edge_mask = None,
     ):
         x, b, h, eps, require_pairwise_repr = single_repr, single_repr.shape[0], self.heads, self.eps, self.require_pairwise_repr
         assert not (require_pairwise_repr and not exists(pairwise_repr)), 'pairwise representation must be given as second argument'
@@ -142,9 +142,9 @@ class InvariantPointAttention(nn.Module):
             attn_logits = attn_logits + attn_logits_pairwise
 
         # mask
-
-        if exists(mask):
-            mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
+        if exists(mask) or exists(edge_mask):
+            if not exists(edge_mask): mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
+            else: mask = edge_mask
             mask = repeat(mask, 'b i j -> (b h) i j', h = h)
             mask_value = max_neg_value(attn_logits)
             attn_logits = attn_logits.masked_fill(~mask, mask_value)

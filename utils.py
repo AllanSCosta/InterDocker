@@ -8,6 +8,31 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 
+def ca_trace_viol_loss(ca_trace, next_d=3.80, other_d=4.0, next_term=3.):
+    """ Imposes physical consistency on ca-trace.
+        L2-based loss on next term distance and avoid steric clashes.
+        Dist for next term is fixed (3.8 A) while others are >= 4.0
+        Inputs:
+        * ca_trace: (B, L, 3) float tensor. coords.
+        * next_d: float. dist CA-CA. L2 on both sides
+        * other_d: float. min dist for CA-other_CA. only applied if closer.
+        * next_term: float. weight for next atom distance.
+        Outputs:
+        * viol_loss: (B, L, L) float tensor.
+    """
+    idxs = np.arange(ca_trace.shape[-2])
+    dist_mat = cdist(ca_trace, ca_trace)   # (B, L, L)
+    # 3.8 between CAs = mp_nerf bond_len
+    next_mask = torch.zeros_like(dist_mat)
+    next_mask[:, idxs[:-1], idxs[1:]] = 1.
+    next_mask[:, idxs[1:], idxs[:-1]] = 1.
+    next_loss = (dist_mat - next_d)**2 * next_mask
+    # non-next CA-CA min dist - experimentally checked
+    next_mask[:, idxs[:-1], idxs[1:]] = 1.
+    clash_loss = (dist_mat - other_d).clamp(min=-np.inf, max=0.)**2 * (1 - next_mask)
+    viol_loss = next_term*next_loss + clash_loss
+    return viol_loss
+
 def fape_loss(batch, pred_translations, pred_rotations, max_val=10., l_func=None, epsilon=1e-4):
     if l_func is None: l_func = lambda x, y, eps=1e-7, sup = max_val: (((x-y)**2).sum(dim=-1) + eps).sqrt()
     mask = batch.node_pad_mask
@@ -18,7 +43,10 @@ def fape_loss(batch, pred_translations, pred_rotations, max_val=10., l_func=None
     xij = torch.einsum('b p, b p q -> b q', true_translations[j] - true_translations[i], true_rotations[i])
     xij = repeat(xij, 'b q -> b t q', t=xij_hat.size(1))
     dij = l_func(xij, xij_hat)
-    l_fape = torch.mean(torch.clamp(dij, min=0, max=max_val)) / max_val
+    if max_val > 0:
+        l_fape = torch.mean(torch.clamp(dij, min=0, max=max_val)) / max_val
+    else:
+        l_fape = torch.mean(dij)
     return l_fape
 
 
@@ -295,7 +323,6 @@ HA_CUTOFFS = [0.5, 1, 2, 4]
 
 
 def get_alignment_metrics(X, Y):
-    X, Y = kabsch_torch(X, Y)
     rmsd = rmsd_torch(X, Y)
     gdt_ts = gdt_torch(X, Y, TS_CUTOFFS)
     gdt_ha = gdt_torch(X, Y, HA_CUTOFFS)
@@ -313,7 +340,7 @@ def get_alignment_metrics(X, Y):
     cond = deviations < beta
     cl1 = torch.where(cond, 0.5 * deviations ** 2 / beta, deviations - 0.5 * beta).mean()
 
-    return {'rmsd': rmsd, 'gdt_ts': gdt_ts, 'gdt_ha': gdt_ha, 'drmsd': drmsd, 'dl1': dl1, 'cl1': cl1}, (X, Y)
+    return {'rmsd': rmsd, 'gdt_ts': gdt_ts, 'gdt_ha': gdt_ha, 'drmsd': drmsd, 'dl1': dl1, 'cl1': cl1}
 
 
 # code below is modified from: https://github.com/lucidrains/alphafold2/blob/main/alphafold2_pytorch/utils.py
@@ -337,35 +364,55 @@ def rmsd_torch(X, Y):
     """ Assumes x,y are both (N x D). See below for wrapper. """
     return torch.sqrt(torch.mean(torch.sum((X - Y)**2 , dim=-1), dim=-1) + 1e-8)
 
-def kabsch_torch(X, Y, cpu=True):
-    # Assumes X,Y are both (N_points x Dims). See below for wrapper.
-    device = X.device
-    X, Y = X.transpose(0, 1), Y.transpose(0, 1)
 
-    #  center X and Y to the origin
-    X_ = X - X.mean(dim=-1, keepdim=True)
-    Y_ = Y - Y.mean(dim=-1, keepdim=True)
-    # calculate convariance matrix (for each prot in the batch)
-    C = torch.matmul(X_, Y_.t()).detach()
-    if cpu:
-        C = C.cpu()
+# https://gist.github.com/oshea00/dfb7d657feca009bf4d095d4cb8ea4be
+def kabsch_torch(A, B):
+    assert len(A) == len(B)
+    N = A.size(0)
 
-    # Optimal rotation matrix via SVD
-    if int(torch.__version__.split(".")[1]) < 8:
-        # warning! int torch 1.<8 : W must be transposed
-        V, S, W = torch.svd(C)
-        W = W.t()
-    else:
-        V, S, W = torch.linalg.svd(C)
+    centroid_A = torch.mean(A, dim=0)
+    centroid_B = torch.mean(B, dim=0)
 
-    # determinant sign for direction correction
-    d = (torch.det(V) * torch.det(W)) < 0.0
-    if d:
-        S[-1]    = S[-1] * (-1)
-        V[:, -1] = V[:, -1] * (-1)
-    # Create Rotation matrix U
-    U = torch.matmul(V, W).to(device)
-    # calculate rotations
-    X_ = torch.matmul(X_.t(), U).t()
-    # return centered and aligned
-    return X_.transpose(0, 1), Y_.transpose(0, 1)
+    AA = A - centroid_A[None, :]
+    BB = B - centroid_B[None, :]
+
+    H = torch.matmul(BB.T, AA)
+    U, S, Vt = torch.linalg.svd(H)
+
+    R = torch.matmul(Vt.T, U.T)
+    t = torch.matmul(-R, centroid_B) + centroid_A
+    return R, t
+#
+#
+# def kabsch_torch(X, Y, cpu=True):
+#     # Assumes X,Y are both (N_points x Dims). See below for wrapper.
+#     device = X.device
+#     X, Y = X.transpose(0, 1), Y.transpose(0, 1)
+#
+#     #  center X and Y to the origin
+#     X_ = X - X.mean(dim=-1, keepdim=True)
+#     Y_ = Y - Y.mean(dim=-1, keepdim=True)
+#     # calculate convariance matrix (for each prot in the batch)
+#     C = torch.matmul(X_, Y_.t()).detach()
+#     if cpu:
+#         C = C.cpu()
+#
+#     # Optimal rotation matrix via SVD
+#     if int(torch.__version__.split(".")[1]) < 8:
+#         # warning! int torch 1.<8 : W must be transposed
+#         V, S, W = torch.svd(C)
+#         W = W.t()
+#     else:
+#         V, S, W = torch.linalg.svd(C)
+#
+#     # determinant sign for direction correction
+#     d = (torch.det(V) * torch.det(W)) < 0.0
+#     if d:
+#         S[-1]    = S[-1] * (-1)
+#         V[:, -1] = V[:, -1] * (-1)
+#     # Create Rotation matrix U
+#     U = torch.matmul(V, W).to(device)
+#     # calculate rotations
+#     X_ = torch.matmul(X_.t(), U).t()
+#     # return centered and aligned
+#     return X_.transpose(0, 1), Y_.transpose(0, 1)

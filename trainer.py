@@ -12,7 +12,7 @@ from tqdm import tqdm
 from visualization import plot_aligned_timeseries, plot_aligned_structures, plot_predictions
 
 from data import VALIDATION_DATASETS, TRAIN_DATASETS, TEST_DATASETS
-from utils import discretize, point_in_circum_to_angle, logit_expectation, get_alignment_metrics, fape_loss, unbatch
+from utils import discretize, point_in_circum_to_angle, logit_expectation, get_alignment_metrics, fape_loss, unbatch, kabsch_torch
 from mp_nerf.protein_utils import get_protein_metrics
 from copy import deepcopy
 from einops import repeat, rearrange
@@ -88,7 +88,7 @@ class Trainer():
 
 
                     loss = metrics['loss'] = (
-                        # self.config.topography_loss_coeff * metrics['dist_xentropy']
+                        self.config.topography_loss_coeff * metrics['dist_xentropy'] +
                         self.config.arrangement_loss_coeff * metrics['fape']
                     )
 
@@ -126,7 +126,7 @@ class Trainer():
             metrics.update(topography_metrics)
 
         if ('translations' in predictions) and ('rotations' in predictions):
-            metrics['fape'] = fape_loss(batch, predictions['translations'], predictions['rotations'], max_val=20)
+            metrics['fape'] = fape_loss(batch, predictions['translations'], predictions['rotations'], max_val=self.config.fape_max_val)
 
             if not is_training:
                 structural_metrics, alignments = self.evaluate_arrangement_predictions(
@@ -198,34 +198,29 @@ class Trainer():
                                 batch.tgt_crds[:, :, 1, :], traj, batch.chns, node_mask):
             gnd_wrap, angles, chains = gnd_wrap[mask], angles[mask], chains[mask]
 
+            pred_traj = pred_traj[-1:] if is_training else pred_traj
+
             for step, pred_wrap in enumerate(pred_traj):
                 pred_wrap = pred_wrap[mask]
 
-                if False:
-                    for chain in (1, 2):
-                        chain_alignment_metrics, _ = get_alignment_metrics(
-                            deepcopy(gnd_wrap)[chains == chain],
-                            pred_wrap[chains == chain],
-                        )
+                rotation, translation = kabsch_torch(pred_wrap, gnd_wrap)
+                align_gnd_coors = torch.einsum('i p , p q -> i q', gnd_wrap, rotation.t()) + translation[None, :]
 
-                        for k, metric in chain_alignment_metrics.items():
-                            metrics[f'internal_{k}'] += metric.mean() / trajectory_len / batch_size / 2
+                alignment_metrics = get_alignment_metrics(align_gnd_coors, pred_wrap)
 
-                alignment_metrics, (align_gnd_coors, align_pred_coors) = get_alignment_metrics(
-                    deepcopy(gnd_wrap),
-                    pred_wrap,
-                )
+                for k, metric in alignment_metrics.items():
+                    metrics[k] += metric.mean() / len(pred_traj) / batch_size
 
+                # alignment_metrics['violation_loss'] = ca_trace_viol_loss(pred_wrap)
                 alignments[id][f'trajectory'].append((align_gnd_coors.detach().cpu(),
-                                                      align_pred_coors.detach().cpu(),
+                                                      pred_wrap.detach().cpu(),
                                                       angles.cpu()))
-                alignments[id][f'alignment_metrics'].append({k: v.mean().cpu().item() for k, v in alignment_metrics.items()})
 
-                for k, metric in alignment_metrics.items():
-                    metrics[k] += metric.mean() / trajectory_len / batch_size
+                # for k, metric in alignment_metrics.items():
+                #     metrics[k] += metric.mean() / len(pred_traj) / batch_size
 
-            if trajectory_len > 1 and step == trajectory_len -1:
-                for k, metric in alignment_metrics.items():
+            if len(pred_traj) > 1 and step == len(pred_traj) -1:
+                for k, metric in chain_alignment_metrics.items():
                     metrics[f'final_{k}'] += metric.mean() / batch_size
 
         return metrics, alignments

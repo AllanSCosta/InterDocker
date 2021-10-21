@@ -127,6 +127,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.str_seqs = scn_data_split['seq']
         self.angs = scn_data_split['ang']
         self.crds = scn_data_split['crd']
+        self.tgt_crds = scn_data_split['tgt_crds'] if 'tgt_crds' in scn_data_split else None
         self.chns = scn_data_split['chn']
         self.ids = scn_data_split['ids']
         self.resolutions = scn_data_split['res']
@@ -152,7 +153,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
         rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
-        tgt_crds = crds.clone()
+        tgt_crds = self.tgt_crds[idx].clone() if self.tgt_crds else crds.clone()
+        tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
+
         backbone_coords = crds[:, 1, :]
         distance_map = torch.cdist(backbone_coords, backbone_coords)
 
