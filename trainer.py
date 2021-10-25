@@ -45,7 +45,7 @@ class Trainer():
                                     number_of_bins=hparams.distance_pred_number_of_bins)
 
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
-
+        self.accumulation = hparams.accumulate_every
 
     def train(self):
         for epoch in range(self.config.max_epochs):
@@ -77,6 +77,7 @@ class Trainer():
         with torch.set_grad_enabled(is_training):
             with tqdm(enumerate(loader), total=len(loader)) as bar:
                 bar.set_description(f'[{epoch}] {split_name}')
+                accumulation, accumulated_loss = 0, 0
                 for batch_idx, batch in bar:
                     torch.cuda.empty_cache()
                     batch = batch.to(self.device)
@@ -92,10 +93,15 @@ class Trainer():
                         self.config.arrangement_loss_coeff * metrics['fape']
                     )
 
-                    if is_training:
+                    accumulation += 1
+                    accumulated_loss += loss / self.accumulation
+
+                    if is_training and accumulation >= self.accumulation:
                         self.optim.zero_grad()
-                        loss.backward()
+                        accumulated_loss.backward()
                         self.optim.step()
+                        accumulation = 0
+                        accumulated_loss = 0
 
                     if is_testing:
                         if prediction_alignments: self.plot_alignments(batch, prediction_alignments)

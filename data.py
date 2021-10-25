@@ -67,7 +67,7 @@ def get_alternative_angles(seq, angles):
 
 def create_dataloaders(config):
     data = {}
-    data['DIPS'] = scn.load(local_scn_path=os.path.join(config.dataset_source, 'dips_pruned.pkl'))
+    data['DIPS'] = scn.load(local_scn_path=os.path.join(config.dataset_source, 'dips_800_pruned.pkl'))
     loaders = {
         split_name: ProteinComplexDataset(
            data[split_name],
@@ -127,12 +127,12 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.str_seqs = scn_data_split['seq']
         self.angs = scn_data_split['ang']
         self.crds = scn_data_split['crd']
-        self.tgt_crds = scn_data_split['tgt_crds'] if 'tgt_crds' in scn_data_split else None
+        self.tgt_crds = scn_data_split['tgt_crd'] if 'tgt_crd' in scn_data_split else None
+        self.tgt_angs = scn_data_split['tgt_ang'] if 'tgt_ang' in scn_data_split else None
         self.chns = scn_data_split['chn']
         self.ids = scn_data_split['ids']
         self.resolutions = scn_data_split['res']
         self.secs = [DSSP_VOCAV.str2ints(s, add_sos_eos) for s in scn_data_split['sec']]
-
         self.split_name = split_name
         self.seq_clamp = seq_clamp
         print(f'=============== {split_name} was loaded!\n')
@@ -153,7 +153,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
         rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
-        tgt_crds = self.tgt_crds[idx].clone() if self.tgt_crds else crds.clone()
+        tgt_crds = torch.FloatTensor(self.tgt_crds[idx]).clone() if self.tgt_crds else crds.clone()
         tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
 
         backbone_coords = crds[:, 1, :]
