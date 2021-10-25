@@ -13,6 +13,8 @@ from torch_geometric.utils import subgraph, to_dense_batch, to_dense_adj
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
+from scipy.spatial import KDTree
+
 from einops import rearrange
 import time
 import sidechainnet as scn
@@ -32,9 +34,8 @@ from mp_nerf.mp_nerf_utils import ensure_chirality
 from copy import deepcopy
 
 TRAIN_DATASETS = ['DIPS']
-VALIDATION_DATASETS = [] #'valid-10', 'valid-70', 'valid-30'] # 'valid-10',  'valid-70' 'valid-90'] # 'valid-20', 'valid-30', 'valid-40', 'valid-50',
 TEST_DATASETS = ['test']
-
+VALIDATION_DATASETS = []
 
 DATASETS = TRAIN_DATASETS + VALIDATION_DATASETS + TEST_DATASETS
 
@@ -93,7 +94,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
                  scn_data_split,
                  split_name,
                  dataset_source,
-                 seq_clamp=184,
+                 spatial_clamp=128,
                  downsample=1.0,
                  max_seq_len=256,
                  add_sos_eos=False,
@@ -133,8 +134,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.ids = scn_data_split['ids']
         self.resolutions = scn_data_split['res']
         self.secs = [DSSP_VOCAV.str2ints(s, add_sos_eos) for s in scn_data_split['sec']]
+
         self.split_name = split_name
-        self.seq_clamp = seq_clamp
+        self.spatial_clamp = spatial_clamp
         print(f'=============== {split_name} was loaded!\n')
 
     def __len__(self):
@@ -190,6 +192,43 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             edge_vectors=edge_vectors,
             edge_angles=edge_angles
         )
+
+        if self.split_name not in TEST_DATASETS and self.spatial_clamp > 0 and datum.__num_nodes__ > self.spatial_clamp:
+            # pick a contact
+            is_external = chains[v] != chains[u]
+            contacts = datum.edge_index[:, (datum.edge_distance < 12) & is_external].T
+            sample_idx = random.sample(range(len(contacts)), k=1)[0]
+            sample_contact = contacts[sample_idx]
+
+            nodes_filter = torch.zeros_like(chains).type(torch.bool)
+            for anchor in sample_contact:
+                anchor_chain, anchor_crd = chains[anchor], backbone_coords[anchor]
+                chain_mask = chains != anchor_chain
+                chain_crds = backbone_coords + chain_mask.float()[:, None] * torch.full_like(backbone_coords, 1000)
+
+                tree = KDTree(chain_crds)
+                _, neighbors = tree.query(anchor_crd, k=min(self.spatial_clamp, chain_mask.sum().item()))
+                neighbors = torch.LongTensor(neighbors)
+                nodes_filter[neighbors] = True
+
+            datum.crds = datum.crds[nodes_filter]
+            datum.tgt_crds = datum.tgt_crds[nodes_filter]
+            datum.bck_crds=datum.bck_crds[nodes_filter]
+            datum.rots=datum.rots[nodes_filter]
+            datum.chns=datum.chns[nodes_filter]
+            datum.seqs=datum.seqs[nodes_filter]
+            datum.angs=datum.angs[nodes_filter]
+            datum.str_seqs=[chr for chr, f in zip(datum.str_seqs, nodes_filter) if f]
+
+            edge_index, datum.edge_distance = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_distance, relabel_nodes=True)
+            _, datum.edge_vectors = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_vectors, relabel_nodes=True)
+            _, datum.edge_angles = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_angles, relabel_nodes=True)
+
+            datum.edge_index = edge_index
+            datum.__num_nodes__ = nodes_filter.sum().item()
 
         datum = deepcopy(datum)
         if (datum.crds[:, 1, :].norm(dim=-1).gt(1e-6) & datum.crds[:, 1, 0].isfinite()).sum() < 10:

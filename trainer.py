@@ -87,7 +87,6 @@ class Trainer():
                     (metrics, prediction_alignments,
                         prediction_images) = self.evaluate_predictions(batch, batch_predictions, is_training)
 
-
                     loss = metrics['loss'] = (
                         self.config.topography_loss_coeff * metrics['dist_xentropy'] +
                         self.config.arrangement_loss_coeff * metrics['fape']

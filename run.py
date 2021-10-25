@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset_source', type=str, default='../data')
     parser.add_argument('--downsample', type=float, default=1.0)
-    parser.add_argument('--seq_clamp', type=int, default=64) # O(s^2) mem
+    parser.add_argument('--spatial_clamp', type=int, default=64) # O(s^2) mem
     parser.add_argument('--max_seq_len', type=int, default=450) # O(s^2) mem
     parser.add_argument('--num_workers', type=int, default=10)
 
@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--dim', type=int, default=128)
     parser.add_argument('--edim', type=int, default=32)
 
-    parser.add_argument('--encoder_depth',type=int, default=5)
+    parser.add_argument('--encoder_depth',type=int, default=3)
     parser.add_argument('--cross_encoder_depth', type=int, default=5)
     parser.add_argument('--docker_depth', type=int, default=6)
 
@@ -90,8 +90,8 @@ if __name__ == '__main__':
 
     # OPTIM
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--accumulate_every', type=int, default=15)
-    parser.add_argument('--batch_size', type=int, default=3)
+    parser.add_argument('--accumulate_every', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=40)
 
     parser.add_argument('--topography_loss_coeff', type=float, default=10)
     parser.add_argument('--arrangement_loss_coeff', type=float, default=1.0)

@@ -400,8 +400,8 @@ class Interactoformer(nn.Module):
         edges[internal_edge_mask] = self.to_internal_edge(edge_structural_signal[internal_edge_mask])
 
         # start from superposition
-        coors = batch.bck_crds.clone().detach()
-        rots = batch.rots
+        coors = torch.zeros_like(batch.bck_crds, device=batch.bck_crds.device)
+        rots = repeat(torch.eye(3), '... -> b n ...', b = batch_size, n = seq_len).to(batch.rots.device)
 
         # encode chains independently
         encodings = self.cross_encoder(nodes, edges, coors, rots, internal_edge_mask)
