@@ -186,7 +186,7 @@ class Trainer():
             chains = batch.chns[batch.node_pad_mask][batch.batch == batch_idx]
             n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
             images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
-            batch_images[id] = images
+            batch_images[batch_idx] = images
 
         return metrics, batch_images
 

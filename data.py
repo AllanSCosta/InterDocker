@@ -67,18 +67,28 @@ def get_alternative_angles(seq, angles):
     return angles
 
 def create_dataloaders(config):
-    data = {}
-    data['DIPS'] = scn.load(local_scn_path=os.path.join(config.dataset_source, 'dips_800_pruned.pkl'))
-    loaders = {
-        split_name: ProteinComplexDataset(
-           data[split_name],
-           split_name=split_name,
-           dataset_source=config.dataset_source,
-           downsample=config.downsample,
-           max_seq_len=config.max_seq_len,
-        ).make_loader(config.batch_size, config.num_workers)
-        for split_name in ('DIPS', )
-    }
+    data = scn.load(local_scn_path=os.path.join(config.dataset_source, 'dips_800_pruned.pkl'))
+    dataset = ProteinComplexDataset(
+       data,
+       split_name='DIPS',
+       dataset_source=config.dataset_source,
+       downsample=config.downsample,
+       max_seq_len=config.max_seq_len,
+    )
+
+    loaders = {}
+    loaders['DIPS'] = dataset.make_loader(config.batch_size, config.num_workers)
+
+    dataset.spatial_clamp = 0
+    test_batches = dataset.make_loader(1, config.num_workers)
+
+    loaders['test'] = []
+    for idx, datum in enumerate(test_batches):
+        loaders['test'].append(datum)
+        if idx > 30: break
+
+    dataset.spatial_clamp = config.spatial_clamp
+
     return loaders
 
 def load_embedding(name, source, type='seq'):
@@ -193,7 +203,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             edge_angles=edge_angles
         )
 
-        if self.split_name not in TEST_DATASETS and self.spatial_clamp > 0 and datum.__num_nodes__ > self.spatial_clamp:
+        if self.spatial_clamp > 0 and datum.__num_nodes__ > self.spatial_clamp:
             # pick a contact
             is_external = chains[v] != chains[u]
             contacts = datum.edge_index[:, (datum.edge_distance < 12) & is_external].T

@@ -115,13 +115,13 @@ class Encoder(nn.Module):
         self.checkpoint = config.checkpoint
 
     def block_checkpoint(self, layer):
-        def checkpoint_forward(nodes, edges, translations, rotations, edge_mask):
+        def checkpoint_forward(nodes, edges, translations, rotations, internal_edge_mask):
             nodes = layer(
                 nodes,
                 pairwise_repr = edges,
                 rotations = rotations,
                 translations = translations,
-                edge_mask = mask
+                edge_mask = internal_edge_mask
             )
             return nodes
         return checkpoint_forward
@@ -173,7 +173,7 @@ class CrossEncoderBlock(nn.Module):
         self.ff_norm = nn.LayerNorm(dim)
         self.ff = FeedForward(dim, mult = ff_mult, num_layers = ff_num_layers)
 
-    def forward(self, nodes, edges, translations, rotations, internal_edge_mask, **kwargs):
+    def forward(self, nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask, **kwargs):
         post_norm = self.post_norm
 
         attn_input = nodes if post_norm else self.attn_norm(nodes)
@@ -188,7 +188,7 @@ class CrossEncoderBlock(nn.Module):
 
         attn = self.attn(
             attn_input,
-            edge_mask=internal_edge_mask
+            edge_mask=external_edge_mask
         )
 
         nodes = nodes + ipa_attn + attn
@@ -225,20 +225,20 @@ class CrossEncoder(nn.Module):
         self.checkpoint = config.checkpoint
 
     def block_checkpoint(self, layer):
-        def checkpoint_forward(nodes, edges, translations, rotations, internal_edge_mask):
-            return layer(nodes, edges, translations, rotations, internal_edge_mask)
+        def checkpoint_forward(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask):
+            return layer(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
         return checkpoint_forward
 
-    def forward(self, nodes, edges, translations, rotations, internal_edge_mask):
+    def forward(self, nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask):
         for layer in self.layers:
             if self.checkpoint:
                 nodes = checkpoint.checkpoint(
                     self.block_checkpoint(layer),
-                    nodes, edges, translations,  rotations, internal_edge_mask
+                    nodes, edges, translations,  rotations, internal_edge_mask, external_edge_mask
                 )
             else:
                 nodes = layer(
-                    nodes, edges, translations, rotations, internal_edge_mask
+                    nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask
                 )
         return nodes
 
@@ -347,8 +347,8 @@ class Interactoformer(nn.Module):
         edge_enc_size = config.distance_number_of_bins + 3 * config.angle_number_of_bins
         self.to_internal_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
 
-        self.external_leak = config.external_leak
-        if self.external_leak:
+        self.structure_only = config.structure_only
+        if self.structure_only:
             self.to_external_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
         else:
             self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim])
@@ -404,17 +404,21 @@ class Interactoformer(nn.Module):
         rots = repeat(torch.eye(3), '... -> b n ...', b = batch_size, n = seq_len).to(batch.rots.device)
 
         # encode chains independently
-        encodings = self.cross_encoder(nodes, edges, coors, rots, internal_edge_mask)
-        nodes = nodes + encodings
+        nodes = nodes + self.encoder(nodes, edges, coors, rots, internal_edge_mask)
 
-        # produce pairwise external representations and compute distance
-        if not self.external_leak:
+        # and then mutually
+        nodes = nodes + self.cross_encoder(nodes, edges, coors, rots, internal_edge_mask, external_edge_mask)
+
+        if self.structure_only:
+            # if we are only dealing with structure docking, we give the distogram solution
+            external_edges = self.to_external_edge(edge_structural_signal)
+        else:
+            # otherwise we build external pairwise representations from encodings
             endpoints = repeat(nodes, 'b s c -> b z s c', z=seq_len), repeat(nodes, 'b s c -> b s z c', z=seq_len)
             cross_cat = torch.cat(endpoints, dim=-1)
             external_edges = self.to_external_edge(cross_cat)
             output['distance_logits'] = self.to_distance(external_edges[external_edge_mask])
-        else:
-            external_edges = self.to_external_edge(edge_structural_signal)
+
         edges = edges + external_edges * external_edge_mask[..., None]
 
         if self.config.distogram_only:
@@ -425,7 +429,7 @@ class Interactoformer(nn.Module):
             coors = coors + torch.normal(0, self.gaussian_noise, coors.shape, device=device)
         rots, coors = rots.clone(), coors.clone()
 
-        # unroll network so we learn to refine ourselves
+        # unroll network and learn to fix own mistakes
         if is_training and self.unroll_steps:
             batch_steps = torch.randint(0, self.unroll_steps, [batch_size])
             with torch.no_grad():

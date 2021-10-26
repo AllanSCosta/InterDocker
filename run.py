@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset_source', type=str, default='../data')
     parser.add_argument('--downsample', type=float, default=1.0)
-    parser.add_argument('--spatial_clamp', type=int, default=64) # O(s^2) mem
+    parser.add_argument('--spatial_clamp', type=int, default=128) # O(s^2) mem
     parser.add_argument('--max_seq_len', type=int, default=450) # O(s^2) mem
     parser.add_argument('--num_workers', type=int, default=10)
 
@@ -52,33 +52,32 @@ if __name__ == '__main__':
     parser.add_argument('--gaussian_noise', type=float, default=0)
 
     parser.add_argument('--checkpoint',type=int, default=1)
-    parser.add_argument('--dim', type=int, default=128)
+    parser.add_argument('--dim', type=int, default=64)
     parser.add_argument('--edim', type=int, default=32)
 
     parser.add_argument('--encoder_depth',type=int, default=3)
-    parser.add_argument('--cross_encoder_depth', type=int, default=5)
-    parser.add_argument('--docker_depth', type=int, default=6)
+    parser.add_argument('--cross_encoder_depth', type=int, default=3)
+    parser.add_argument('--docker_depth', type=int, default=3)
 
-    parser.add_argument('--heads', type=int, default=2) # O(h) mem
+    parser.add_argument('--heads', type=int, default=4) # O(h) mem
     parser.add_argument('--scalar_key_dim',type=int, default=32)
     parser.add_argument('--scalar_value_dim',type=int, default=32)
     parser.add_argument('--point_key_dim', type=int, default=8)
     parser.add_argument('--point_value_dim', type=int, default=8)
 
 
-    parser.add_argument('--graph_head_dim', type=int, default=64)
-    parser.add_argument('--graph_heads', type=int, default=1)
+    parser.add_argument('--graph_head_dim', type=int, default=32)
+    parser.add_argument('--graph_heads', type=int, default=4)
 
 
     # ITERATION STEPS
-    parser.add_argument('--unroll_steps', type=int, default=30) # O(1) mem
+    parser.add_argument('--unroll_steps', type=int, default=20) # O(1) mem
     parser.add_argument('--eval_steps', type=int, default=10)
 
     # ========================
     # OPTIMIZATION
     # ========================
-
-    parser.add_argument('--external_leak', type=int, default=0)
+    parser.add_argument('--structure_only', type=int, default=0)
     parser.add_argument('--distogram_only', type=int, default=1)
 
 
@@ -91,15 +90,15 @@ if __name__ == '__main__':
     # OPTIM
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--accumulate_every', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=40)
+    parser.add_argument('--batch_size', type=int, default=60)
 
-    parser.add_argument('--topography_loss_coeff', type=float, default=10)
+    parser.add_argument('--topography_loss_coeff', type=float, default=1.0)
     parser.add_argument('--arrangement_loss_coeff', type=float, default=1.0)
 
     parser.add_argument('--max_epochs', type=int, default=10)
     parser.add_argument('--validation_check_rate', type=int, default=10)
     parser.add_argument('--validation_start', type=int, default=20)
-    parser.add_argument('--fape_max_val', type=int, default=10)
+    parser.add_argument('--fape_max_val', type=int, default=20)
 
 
     # ========================
@@ -125,11 +124,6 @@ if __name__ == '__main__':
         )
 
     loaders = create_dataloaders(config)
-
-    loaders['test'] = []
-    for idx, datum in enumerate(loaders['DIPS']):
-        loaders['test'].append(datum)
-        break
 
     if config.test_model != '-':
         model = Interactoformer(config)
