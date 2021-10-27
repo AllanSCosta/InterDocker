@@ -13,7 +13,6 @@ from model import Interactoformer
 
 from utils import submit_script
 
-torch.autograd.set_detect_anomaly(True)
 
 import argparse
 
