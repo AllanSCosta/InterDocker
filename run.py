@@ -58,7 +58,7 @@ if __name__ == '__main__':
     parser.add_argument('--cross_encoder_depth', type=int, default=3)
     parser.add_argument('--docker_depth', type=int, default=3)
 
-    parser.add_argument('--heads', type=int, default=4) # O(h) mem
+    parser.add_argument('--heads', type=int, default=2) # O(h) mem
     parser.add_argument('--scalar_key_dim',type=int, default=32)
     parser.add_argument('--scalar_value_dim',type=int, default=32)
     parser.add_argument('--point_key_dim', type=int, default=8)
@@ -66,12 +66,13 @@ if __name__ == '__main__':
 
 
     parser.add_argument('--graph_head_dim', type=int, default=32)
-    parser.add_argument('--graph_heads', type=int, default=4)
+    parser.add_argument('--graph_heads', type=int, default=2)
 
 
     # ITERATION STEPS
-    parser.add_argument('--unroll_steps', type=int, default=20) # O(1) mem
+    parser.add_argument('--unroll_steps', type=int, default=10) # O(1) mem
     parser.add_argument('--eval_steps', type=int, default=10)
+
 
     # ========================
     # OPTIMIZATION

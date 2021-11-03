@@ -127,6 +127,7 @@ class InvariantPointAttention(nn.Module):
         # derive attn logits for point attention
 
         point_qk_diff = rearrange(q_point, 'b i d c -> b i () d c') - rearrange(k_point, 'b j d c -> b () j d c')
+        breakpoint()
         point_dist = (point_qk_diff ** 2).sum(dim = -2)
 
         point_weights = F.softplus(self.point_weights)
@@ -181,15 +182,15 @@ class InvariantPointAttention(nn.Module):
         results_points_norm = rearrange(results_points_norm, '(b h) n d -> b n (h d)', h = h)
 
         results = (results_scalar, results_points, results_points_norm)
+        results = torch.cat(results, dim = -1)
+        results = self.to_out(results)
 
         if require_pairwise_repr:
             results_pairwise = rearrange(results_pairwise, 'b h n d -> b n (h d)', h = h)
-            results = (*results, results_pairwise)
+            results = results, results_pairwise
 
         # concat results and project out
-
-        results = torch.cat(results, dim = -1)
-        return self.to_out(results)
+        return results
 
 # one transformer block based on IPA
 

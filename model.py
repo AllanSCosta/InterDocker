@@ -335,7 +335,9 @@ class Interactoformer(nn.Module):
         self.docker = Docker(config)
 
         self.to_distance = Dense([config.edim, config.edim, config.distance_pred_number_of_bins])
+        self.from_distance = Dense([config.distance_pred_number_of_bins, config.edim, config.edim])
 
+        self.distance_pred_number_of_bins = config.distance_pred_number_of_bins
         self.gaussian_noise = config.gaussian_noise
         self.unroll_steps = config.unroll_steps
 
@@ -406,18 +408,62 @@ class Interactoformer(nn.Module):
         # encode chains independently
         nodes = nodes + self.encoder(nodes, edges, coors, rots, internal_edge_mask)
 
-        # and then mutually
-        nodes = nodes + self.cross_encoder(nodes, edges, coors, rots, internal_edge_mask, external_edge_mask)
+        # start off with a null hypothesis
+        hypothesis = torch.zeros(batch_size, seq_len, seq_len, self.distance_pred_number_of_bins, device=edges.device)
+
+        # and then mutually; first by unrolling
+        if is_training and self.unroll_steps:
+            batch_steps = torch.randint(0, self.unroll_steps, [batch_size])
+            with torch.no_grad():
+                max_step = torch.max(batch_steps).item()
+                for step in range(max_step):
+                    chosen = batch_steps >= step
+
+                    cross_encodings = self.cross_encoder(
+                        nodes[chosen],
+                        edges[chosen] + self.from_distance(hypothesis[chosen]),
+                        coors[chosen],
+                        rots[chosen],
+                        internal_edge_mask[chosen],
+                        external_edge_mask[chosen]
+                    )
+
+                    chosen_nodes = nodes[chosen] + cross_encodings
+
+                    endpoints = (repeat(chosen_nodes, 'b s c -> b z s c', z=seq_len),
+                                 repeat(chosen_nodes, 'b s c -> b s z c', z=seq_len))
+                    cross_cat = torch.cat(endpoints, dim=-1)
+
+                    external_edges = self.to_external_edge(cross_cat)
+                    distance_update = self.to_distance(external_edges)
+
+                    hypothesis[chosen] = hypothesis[chosen] + distance_update * external_edge_mask[chosen, ..., None]
+
+
+        for _ in range(1 if is_training else self.eval_steps):
+            cross_encodings = self.cross_encoder(
+                nodes, edges + self.from_distance(hypothesis), coors, rots,
+                internal_edge_mask,
+                external_edge_mask
+            )
+
+            nodes = nodes + cross_encodings
+
+            endpoints = (repeat(cross_encodings, 'b s c -> b z s c', z=seq_len),
+                         repeat(cross_encodings, 'b s c -> b s z c', z=seq_len))
+            cross_cat = torch.cat(endpoints, dim=-1)
+
+            external_edges = self.to_external_edge(cross_cat)
+            distance_update = self.to_distance(external_edges)
+
+            hypothesis = hypothesis + distance_update * external_edge_mask[..., None]
 
         if self.structure_only:
             # if we are only dealing with structure docking, we give the distogram solution
             external_edges = self.to_external_edge(edge_structural_signal)
         else:
             # otherwise we build external pairwise representations from encodings
-            endpoints = repeat(nodes, 'b s c -> b z s c', z=seq_len), repeat(nodes, 'b s c -> b s z c', z=seq_len)
-            cross_cat = torch.cat(endpoints, dim=-1)
-            external_edges = self.to_external_edge(cross_cat)
-            output['distance_logits'] = self.to_distance(external_edges[external_edge_mask])
+            output['distance_logits'] = hypothesis[external_edge_mask]
 
         edges = edges + external_edges * external_edge_mask[..., None]
 

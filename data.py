@@ -106,7 +106,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
                  dataset_source,
                  spatial_clamp=128,
                  downsample=1.0,
-                 max_seq_len=256,
+                 max_seq_len=1000000,
                  add_sos_eos=False,
                  sort_by_length=False,
                  reverse_sort=True):
