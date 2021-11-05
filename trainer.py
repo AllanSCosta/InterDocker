@@ -19,9 +19,6 @@ from einops import repeat, rearrange
 eps = 1e-7
 
 
-def unit_circle_loss(rotations):
-    return (rotations.norm(dim=-1) - 1).pow(2).mean()
-
 class Trainer():
     def __init__(self, hparams, model, loaders):
         super().__init__()
@@ -32,10 +29,9 @@ class Trainer():
         self.model.to(self.device)
         self.loaders = loaders
 
-        if wandb.run:
-            self.model_path = os.path.join(wandb.run.dir, 'checkpoint.pt')
-            print(f'model path: {self.model_path}')
-            wandb.watch(self.model)
+        self.model_path = os.path.join(wandb.run.dir, 'checkpoint.pt')
+        print(f'model path: {self.model_path}')
+        wandb.watch(self.model)
 
         self.best_val_loss   = float('inf')
 
@@ -102,17 +98,17 @@ class Trainer():
                         accumulation = 0
                         accumulated_loss = 0
 
-                    if is_testing:
+                    if is_testing and batch_idx == 0:
                         if prediction_alignments: self.plot_alignments(batch, prediction_alignments)
                         if prediction_images: self.plot_images(prediction_images)
 
                     for k, v in metrics.items(): epoch_metrics[k].append(v.item() if type(v) is not float else v)
 
                     if batch_idx % self.config.report_frequency == 0:
-                        report = ', '.join([f'{k}={np.mean(epoch_metrics[k]):.3e}' for k, v in epoch_metrics.items()])
+                        report = ', '.join([f'{k}={np.mean(epoch_metrics[k][-50:]):.3e}' for k, v in epoch_metrics.items()])
                         print(report)
 
-                    bar.set_postfix(loss = f'{np.mean(epoch_metrics["loss"][-100:]):.3e}')
+                    bar.set_postfix(loss = f'{np.mean(epoch_metrics["loss"][-50:]):.3e}')
 
         epoch_metrics = { f'{split_name} {k}': np.mean(v)
                          for k, v in epoch_metrics.items() }
@@ -170,7 +166,7 @@ class Trainer():
         false_negatives = (~pred_contacts & ground_contacts).sum()
 
         metrics[f'contact_precision'] = true_positives / (true_positives + false_positives + eps)
-        metrics[f'contact_recall'] =    true_positives / (true_positives + false_negatives + eps)
+        metrics[f'contact_recall']    = true_positives / (true_positives + false_negatives + eps)
 
         batch_images = dict()
         batch_size, seq_len, _ = batch.edge_record_mask.size()
@@ -221,8 +217,8 @@ class Trainer():
                                                       pred_wrap.detach().cpu(),
                                                       angles.cpu()))
 
-                # for k, metric in alignment_metrics.items():
-                #     metrics[k] += metric.mean() / len(pred_traj) / batch_size
+                for k, metric in alignment_metrics.items():
+                    metrics[k] += metric.mean() / len(pred_traj) / batch_size
 
             if len(pred_traj) > 1 and step == len(pred_traj) -1:
                 for k, metric in chain_alignment_metrics.items():

@@ -13,48 +13,62 @@ import argparse
 from tqdm.contrib.concurrent import process_map
 
 import re
+import time
+
+import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 
 def load_complex(path_tuple):
-    path, complex = path_tuple
-    if not os.path.exists(path): return None
-
-    subunits = [(m.start(0), m.end(0)) for m in re.finditer('[A-Z]+_[0-10]*', complex)][0]
-    sub_names = complex[:subunits[0]+1], complex[subunits[1]:]
-    target_name = f'{sub_names[0][:4] + sub_names[0][-1]}_{sub_names[1][:4] + sub_names[1][-1]}'
-    path = f'../data/{target_name[:2]}/{target_name}'
-
-    try:
-        with open(os.path.join('../data', target_name), 'rb') as file:
-            encodings = pickle.load(file)
-        with open(os.path.join(path, 'scn_complex.pkl'), 'rb') as file:
-            complex = pickle.load(file)
-    except:
+    num, path, complex = path_tuple
+    if not os.path.exists(path):
         return None
-
+    filepath = os.path.join(path, 'scn_complex_esm_128.pkl')
+    print(f'[{num}] {filepath}')
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, 'rb') as file:
+        complex = pickle.load(file)
     return complex
 
+
+import multiprocessing
+import random
+
 if __name__ == '__main__':
-    pdb_path = '/home/gridsan/allanc/language_models_benchmarks/dips_pdb'
-    dataset = defaultdict(list)
+    base_path = '../../data/dips_preprocessed/'
+    dataset = dict()
 
-    paths = []
-    for section in os.listdir(pdb_path):
-        section_path = os.path.join(pdb_path, section)
-        for complex in os.listdir(section_path):
-            paths.append((os.path.join(section_path, complex), complex))
+    pool = multiprocessing.Pool(processes=40)
+    downsample = 0.1
 
-    complexes = []
-    for path in paths:
-        complexes.append(load_complex(path))
-    # complexes = process_map(load_complex, paths)
-    # dataset = defaultdict(list)
+    for split in ('train', 'test'):
+        split_path = os.path.join(base_path, split)
 
-    for complex in tqdm(complexes):
-        if not complex: continue
-        for key in ('ids', 'crd', 'ang', 'seq', 'chn'):
-            dataset[key].append(complex[key])
+        paths, counter = [], 0
+        for section in os.listdir(split_path):
+            section_path = os.path.join(split_path, section)
+            for complex in os.listdir(section_path):
+                paths.append((counter, os.path.join(section_path, complex), complex))
+                counter += 1
 
-    with open('dips_800_pruned.pkl', 'wb') as file:
+        print(f'fetched {len(paths)} paths for {split}')
+        random.shuffle(paths)
+        # paths = paths[:int(0.08 * len(paths))]
+        # print(f'reduced to {len(paths)} paths for {split}')
+
+        complexes = pool.map(load_complex, paths)
+        print(f'fetched {len(complexes)} complexes for {split}')
+
+        split_dataset = defaultdict(list)
+        for complex in tqdm(complexes):
+            if not complex: continue
+            for key in ('ids', 'crd', 'ang', 'seq', 'chn', 'enc'):
+                split_dataset[key].append(complex[key])
+
+        dataset[split] = split_dataset
+
+    with open('dips_1024_pruned_esm_128.pkl', 'wb') as file:
         pickle.dump(dataset, file)
-    print(f'final dataset has size {len(dataset["seq"])}')
+
     print('done')

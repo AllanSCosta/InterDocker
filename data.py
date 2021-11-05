@@ -33,14 +33,14 @@ from tqdm import tqdm
 from mp_nerf.mp_nerf_utils import ensure_chirality
 from copy import deepcopy
 
-TRAIN_DATASETS = ['DIPS']
+TRAIN_DATASETS = ['train']
 TEST_DATASETS = ['test']
 VALIDATION_DATASETS = []
 
 DATASETS = TRAIN_DATASETS + VALIDATION_DATASETS + TEST_DATASETS
 
 DSSP_VOCAV = DSSPVocabulary()
-
+import bz2
 import torch.nn.functional as F
 
 def rot_matrix(a, b, c):
@@ -51,53 +51,28 @@ def rot_matrix(a, b, c):
     b3 = torch.cross(b1, b2, dim=-1)
     return torch.stack((b1, b2, b3), dim=-2)
 
-res_to_mirror_symmetry = {
-    "D": 1,
-    "F": 1,
-    "Y": 1,
-    "E": 2
-}
-
-def get_alternative_angles(seq, angles):
-    ambiguous = res_to_mirror_symmetry.keys()
-    angles = deepcopy(angles)
-    for res_idx, res in enumerate(seq):
-        if res in ambiguous:
-            angles[res_idx][6+res_to_mirror_symmetry[res]] -= math.pi
-    return angles
 
 def create_dataloaders(config):
-    data = scn.load(local_scn_path=os.path.join(config.dataset_source, 'dips_800_pruned.pkl'))
-    dataset = ProteinComplexDataset(
-       data,
-       split_name='DIPS',
-       dataset_source=config.dataset_source,
-       downsample=config.downsample,
-       max_seq_len=config.max_seq_len,
-    )
+    print(f'Loading DIPS - {"sample" if config.debug else "full"}')
+    filename = f'dips_1024_pruned_esm_128{"_sample" if config.debug else ""}.pkl'
+    filepath = os.path.join(config.dataset_source, filename)
 
-    loaders = {}
-    loaders['DIPS'] = dataset.make_loader(config.batch_size, config.num_workers)
+    with open(filepath, 'rb') as file:
+        start = time.time()
+        data = pickle.load(file)
+        print(f'{time.time() - start:.2f} seconds to load dataset')
 
-    dataset.spatial_clamp = 0
-    test_batches = dataset.make_loader(1, config.num_workers)
-
-    loaders['test'] = []
-    for idx, datum in enumerate(test_batches):
-        loaders['test'].append(datum)
-        if idx > 30: break
-
-    dataset.spatial_clamp = config.spatial_clamp
-
+    loaders = {
+        split: ProteinComplexDataset(
+           dataset,
+           split_name=split,
+           dataset_source=config.dataset_source,
+           downsample=config.downsample,
+           max_seq_len=config.max_seq_len,
+        ).make_loader(config.batch_size, config.num_workers)
+        for split, dataset in data.items()
+    }
     return loaders
-
-def load_embedding(name, source, type='seq'):
-    encodings_dir = os.path.join(source, f'{type}_encodings')
-    filepath = os.path.join(encodings_dir, name + '.pyd')
-    if not os.path.exists(filepath): return (None, None)
-    with open(filepath, 'rb') as f:
-        emb, att = pickle.load(f)
-    return emb, att
 
 class ProteinComplexDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -138,16 +113,15 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.str_seqs = scn_data_split['seq']
         self.angs = scn_data_split['ang']
         self.crds = scn_data_split['crd']
-        self.tgt_crds = scn_data_split['tgt_crd'] if 'tgt_crd' in scn_data_split else None
-        self.tgt_angs = scn_data_split['tgt_ang'] if 'tgt_ang' in scn_data_split else None
         self.chns = scn_data_split['chn']
+        self.encs = scn_data_split['enc']
         self.ids = scn_data_split['ids']
         self.resolutions = scn_data_split['res']
         self.secs = [DSSP_VOCAV.str2ints(s, add_sos_eos) for s in scn_data_split['sec']]
 
         self.split_name = split_name
         self.spatial_clamp = spatial_clamp
-        print(f'=============== {split_name} was loaded!\n')
+        print(f'=============== {split_name} was loaded! {split_name} has size {len(self.seqs)} \n')
 
     def __len__(self):
         return len(self.seqs)
@@ -163,10 +137,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         chains = chains.float() + 1
 
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
+        tgt_crds = crds.clone()
         rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
-        tgt_crds = torch.FloatTensor(self.tgt_crds[idx]).clone() if self.tgt_crds else crds.clone()
-        tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
 
         backbone_coords = crds[:, 1, :]
         distance_map = torch.cdist(backbone_coords, backbone_coords)
@@ -187,6 +160,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         backbone_coords = crds[:, 1, :]
 
         datum = Data(
+            num_nodes=len(seqs),
             __num_nodes__=len(seqs),
             ids=self.ids[idx],
             crds=crds,
@@ -195,6 +169,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             rots=rots,
             chns=chains,
             seqs=torch.LongTensor(seqs) + 1,
+            encs=torch.FloatTensor(self.encs[idx].type(torch.float32)),
             angs=torch.FloatTensor(self.angs[idx]),
             str_seqs=self.str_seqs[idx],
             edge_index=edge_index,
@@ -228,6 +203,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             datum.chns=datum.chns[nodes_filter]
             datum.seqs=datum.seqs[nodes_filter]
             datum.angs=datum.angs[nodes_filter]
+            datum.encs=datum.encs[nodes_filter]
             datum.str_seqs=[chr for chr, f in zip(datum.str_seqs, nodes_filter) if f]
 
             edge_index, datum.edge_distance = subgraph(nodes_filter, datum.edge_index,
@@ -238,7 +214,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
                         edge_attr=datum.edge_angles, relabel_nodes=True)
 
             datum.edge_index = edge_index
-            datum.__num_nodes__ = nodes_filter.sum().item()
+            datum.__num_nodes__ = datum.num_nodes = nodes_filter.sum().item()
 
         datum = deepcopy(datum)
         if (datum.crds[:, 1, :].norm(dim=-1).gt(1e-6) & datum.crds[:, 1, 0].isfinite()).sum() < 10:
@@ -267,7 +243,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
 def collate_fn(stream):
     batch = Batch.from_data_list(stream)
-    for key in ('seqs', 'tgt_crds', 'crds', 'bck_crds', 'angs', 'rots', 'chns'):
+    for key in ('seqs', 'tgt_crds', 'crds', 'bck_crds', 'angs', 'rots', 'chns', 'encs'):
         if batch[key] is None: continue
         batch[key], mask = to_dense_batch(batch[key], batch=batch.batch)
     for key in ('edge_distance', 'edge_angles'):

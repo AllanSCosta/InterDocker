@@ -252,8 +252,8 @@ defaults = {
 import randomname
 def random_name():
     return randomname.get_name(
-        adj=('speed', 'emotions', 'temperature'),
-        noun=('astronomy', 'set_theory', 'military_navy', 'infrastructure')
+        adj=('speed', 'emotions', 'temperature', 'weather', 'character', 'algorithms', 'geometry', 'complexity', 'physics', 'shape', 'taste', 'colors', 'size', 'appearance'),
+        noun=('astronomy', 'set_theory', 'military_navy', 'infrastructure', 'chemistry', 'physics', 'algorithms', 'geometry', 'coding', 'architecture', 'metals', 'apex_predators')
     )
 
 import os

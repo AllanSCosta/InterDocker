@@ -15,9 +15,6 @@ from scipy.interpolate import interp1d, splprep, splev
 import torch
 from plotly.subplots import make_subplots
 
-import gif
-gif.options.matplotlib["dpi"] = 300
-
 import plotly.graph_objects as go
 from torch.linalg import norm
 

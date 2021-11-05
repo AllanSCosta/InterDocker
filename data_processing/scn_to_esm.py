@@ -63,6 +63,7 @@ def augment_dataset(path, funnel, transformer, batch_converter, dtype=torch.floa
 
     print(f'{destination} just computed')
 
+
 def submit_map(params):
     params = dict(vars(params))
     script_path = os.path.realpath(__file__)
