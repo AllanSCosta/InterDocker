@@ -119,10 +119,10 @@ class Trainer():
     def evaluate_predictions(self, batch, predictions, is_training=False):
         metrics, alignments, images = defaultdict(float), dict(), dict()
 
-        if 'distance_logits' in predictions:
+        if 'logit_traj' in predictions:
             topography_metrics, images = self.evaluate_topography_predictions(
                 batch,
-                predictions['distance_logits'],
+                predictions['logit_traj'],
             )
             metrics.update(topography_metrics)
 
@@ -138,7 +138,7 @@ class Trainer():
         return metrics, alignments, images
 
 
-    def evaluate_topography_predictions(self, batch, distance_logits):
+    def evaluate_topography_predictions(self, batch, distance_logits_trajectory):
         metrics = defaultdict(int)
 
         external_edges = (rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()'))
@@ -147,42 +147,59 @@ class Trainer():
         distance_ground = batch.edge_distance[external_edges]
         distance_labels = self.distance_binner(distance_ground)
 
-        metrics[f'dist_xentropy'] = F.cross_entropy(
-            distance_logits[batch.edge_record_mask[external_edges]],
-            distance_labels[batch.edge_record_mask[external_edges]]
-        )
-        metrics[f'dist_acc'] = (distance_logits.argmax(-1) == distance_labels).float().mean()
+        batch_images = defaultdict(list)
+        trajectory_len = len(distance_logits_trajectory)
 
-        probabilities = distance_logits.softmax(-1)
-        values = torch.linspace(0, self.config.distance_pred_max_radius,
-                    self.config.distance_pred_number_of_bins, device=distance_logits.device)
-        expectation = (probabilities * values.unsqueeze(0)).sum(-1)
+        for t, distance_logits in enumerate(distance_logits_trajectory):
+            dist_xentropy = F.cross_entropy(
+                distance_logits[batch.edge_record_mask[external_edges]],
+                distance_labels[batch.edge_record_mask[external_edges]]
+            )
 
-        pred_contacts = expectation < self.config.contact_cut
-        ground_contacts = distance_ground < self.config.contact_cut
+            dist_acc = (distance_logits.argmax(-1) == distance_labels).float().mean()
 
-        true_positives  = (pred_contacts & ground_contacts).sum()
-        false_positives = (pred_contacts & ~ground_contacts).sum()
-        false_negatives = (~pred_contacts & ground_contacts).sum()
+            metrics[f'dist_xentropy'] += dist_xentropy / trajectory_len
+            metrics[f'dist_acc'] +=  dist_acc / trajectory_len
 
-        metrics[f'contact_precision'] = true_positives / (true_positives + false_positives + eps)
-        metrics[f'contact_recall']    = true_positives / (true_positives + false_negatives + eps)
+            probabilities = distance_logits.softmax(-1)
+            values = torch.linspace(0, self.config.distance_pred_max_radius,
+                        self.config.distance_pred_number_of_bins, device=distance_logits.device)
+            expectation = (probabilities * values.unsqueeze(0)).sum(-1)
 
-        batch_images = dict()
-        batch_size, seq_len, _ = batch.edge_record_mask.size()
-        edge_batches = repeat(torch.arange(0, batch_size), 'b -> b s z', s=seq_len, z=seq_len)
-        edge_batches = edge_batches[external_edges]
+            pred_contacts = expectation < self.config.contact_cut
+            ground_contacts = distance_ground < self.config.contact_cut
 
-        for batch_idx, id in enumerate(batch.ids):
-            batch_filter = edge_batches == batch_idx
-            images = [img[batch_filter].detach() for img in
-                (distance_labels, expectation, ground_contacts.float(), pred_contacts.float())]
-            images = [img[:int(len(img)/2)] for img in images]
+            true_positives  = (pred_contacts & ground_contacts).sum()
+            false_positives = (pred_contacts & ~ground_contacts).sum()
+            false_negatives = (~pred_contacts & ground_contacts).sum()
 
-            chains = batch.chns[batch.node_pad_mask][batch.batch == batch_idx]
-            n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
-            images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
-            batch_images[batch_idx] = images
+            contact_precision = (true_positives / (true_positives + false_positives + eps))
+            contact_recall = (true_positives / (true_positives + false_negatives + eps))
+
+            metrics[f'contact_precision'] =  contact_precision / trajectory_len
+            metrics[f'contact_recall']    =  contact_recall / trajectory_len
+
+            batch_size, seq_len, _ = batch.edge_record_mask.size()
+            edge_batches = repeat(torch.arange(0, batch_size), 'b -> b s z', s=seq_len, z=seq_len)
+            edge_batches = edge_batches[external_edges]
+
+            for batch_idx, id in enumerate(batch.ids):
+                batch_filter = edge_batches == batch_idx
+                images = [img[batch_filter].detach() for img in
+                    (distance_labels, expectation, ground_contacts.float(), pred_contacts.float())]
+                images = [img[:int(len(img)/2)] for img in images]
+
+                chains = batch.chns[batch.node_pad_mask][batch.batch == batch_idx]
+                n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
+                images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
+
+                batch_images[id].append(images)
+
+            if t == trajectory_len - 1:
+                metrics[f'final_dist_xentropy'] = dist_xentropy
+                metrics[f'final_dist_acc'] =  dist_acc
+                metrics[f'final_contact_precision'] = contact_precision
+                metrics[f'final_contact_recall'] = contact_recall
 
         return metrics, batch_images
 
@@ -228,13 +245,13 @@ class Trainer():
 
 
     def plot_images(self, images):
-        for id, imgs in images.items():
-            prediction_figure = plot_predictions(*imgs)
-
-            if wandb.run:
-                wandb.log({
-                    f'{id} at topography prediction': prediction_figure,
-                })
+        for id, img_trajectory in images.items():
+            for imgs in img_trajectory:
+                prediction_figure = plot_predictions(*imgs)
+                if wandb.run:
+                    wandb.log({
+                        f'{id} at topography prediction': prediction_figure,
+                    })
 
     def plot_alignments(self, batch, alignments):
         for id, sequence, chain, mask in zip(batch.ids, batch.str_seqs, batch.chns, batch.node_pad_mask):

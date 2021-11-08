@@ -208,39 +208,51 @@ class CrossEncoder(nn.Module):
         ):
         super().__init__()
         self.layers = nn.ModuleList([
-            CrossEncoderBlock(
-                dim = config.dim,
-                edim = config.edim,
-                heads = config.heads,
-                graph_heads = config.graph_heads,
-                scalar_key_dim = config.scalar_key_dim,
-                scalar_value_dim = config.scalar_value_dim,
-                point_key_dim = config.point_key_dim,
-                point_value_dim = config.point_value_dim,
-                graph_head_dim=config.graph_head_dim,
-            )
-            for _ in range(config.cross_encoder_depth)
+            nn.ModuleList([
+                CrossEncoderBlock(
+                    dim = config.dim,
+                    edim = config.edim,
+                    heads = config.heads,
+                    graph_heads = config.graph_heads,
+                    scalar_key_dim = config.scalar_key_dim,
+                    scalar_value_dim = config.scalar_value_dim,
+                    point_key_dim = config.point_key_dim,
+                    point_value_dim = config.point_value_dim,
+                    graph_head_dim=config.graph_head_dim,
+                ),
+                Dense(
+                  [2 * config.dim, 2 * config.dim, 2 * config.distance_pred_number_of_bins, config.distance_pred_number_of_bins]
+                )
+            ]) for _ in range(config.cross_encoder_depth)
         ])
+
 
         self.checkpoint = config.checkpoint
 
-    def block_checkpoint(self, layer):
+    def block_checkpoint(self, layer, to_distance):
         def checkpoint_forward(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask):
-            return layer(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
+            nodes = layer(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
+            endpoints = (repeat(nodes, 'b s c -> b z s c', z=nodes.size(1)),
+                         repeat(nodes, 'b s c -> b s z c', z=nodes.size(1)))
+            external_edges = torch.cat(endpoints, dim=-1)
+            logits = to_distance(external_edges)
+            return nodes, logits
         return checkpoint_forward
 
     def forward(self, nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask):
-        for layer in self.layers:
+        distance_logits_trajectory = []
+        for (layer, to_distance) in self.layers:
             if self.checkpoint:
-                nodes = checkpoint.checkpoint(
-                    self.block_checkpoint(layer),
+                nodes, logits = checkpoint.checkpoint(
+                    self.block_checkpoint(layer, to_distance),
                     nodes, edges, translations,  rotations, internal_edge_mask, external_edge_mask
                 )
             else:
-                nodes = layer(
+                nodes, logits = layer(
                     nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask
                 )
-        return nodes
+            distance_logits_trajectory.append(logits)
+        return nodes, distance_logits_trajectory
 
 
 class Docker(nn.Module):
@@ -330,6 +342,7 @@ class Interactoformer(nn.Module):
             self.node_token_emb = nn.Embedding(21, config.dim, padding_idx=0)
 
         self.circum_emb = nn.Linear(2, 12)
+        # self.chain_emb = nn.Embedding(2, config.dim, padding_idx=0)
 
         self.backbone_dihedrals_emb = Dense([6 * 12, 64, 32])
         self.sidechain_dihedrals_emb = Dense([6 * 12, 64, 32])
@@ -338,9 +351,6 @@ class Interactoformer(nn.Module):
         self.encoder = Encoder(config)
         self.cross_encoder = CrossEncoder(config)
         self.docker = Docker(config)
-
-        self.to_distance = Dense([config.edim, config.edim, config.distance_pred_number_of_bins])
-        self.from_distance = Dense([config.distance_pred_number_of_bins, config.edim, config.edim])
 
         self.distance_pred_number_of_bins = config.distance_pred_number_of_bins
         self.gaussian_noise = config.gaussian_noise
@@ -362,7 +372,6 @@ class Interactoformer(nn.Module):
 
         self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins])
         self.to_position = Dense([config.dim, config.dim, 3])
-
 
         self.unroll_steps = config.unroll_steps
         self.eval_steps = config.eval_steps
@@ -391,8 +400,9 @@ class Interactoformer(nn.Module):
         sc_dihedrals = self.sidechain_dihedrals_emb(sc_dihedrals)
 
         dihedrals = self.dihedral_emb(torch.cat((bb_dihedrals, sc_dihedrals), dim=-1))
+        # chains = self.chain_emb(batch.chns)
 
-        nodes = nodes + dihedrals
+        nodes = nodes + dihedrals # + chains
 
         # produce distance and angular signal for pairwise internal representations
         edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=device)
@@ -416,7 +426,7 @@ class Interactoformer(nn.Module):
         # encode chains independently
         nodes = nodes + self.encoder(nodes, edges, coors, rots, internal_edge_mask)
 
-        cross_encodings = self.cross_encoder(
+        cross_encodings, logits_trajectory = self.cross_encoder(
             nodes, edges, coors, rots,
             internal_edge_mask,
             external_edge_mask
@@ -435,7 +445,9 @@ class Interactoformer(nn.Module):
             external_edges = self.to_external_edge(edge_structural_signal)
         else:
             # otherwise we build external pairwise representations from encodings
-            output['distance_logits'] = self.to_distance(external_edges[external_edge_mask])
+            logits_trajectory = rearrange(logits_trajectory, 't b s z l -> b s z t l')
+            logits_trajectory = rearrange(logits_trajectory[external_edge_mask], 'e t l -> t e l')
+            output['logit_traj'] = logits_trajectory
 
         edges = edges + external_edges * external_edge_mask[..., None]
 
