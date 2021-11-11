@@ -17,14 +17,15 @@ from mp_nerf.protein_utils import get_protein_metrics
 from copy import deepcopy
 from einops import repeat, rearrange
 eps = 1e-7
-
+IGNORE_IDX = -100
 
 class Trainer():
-    def __init__(self, hparams, model, loaders):
+
+    def __init__(self, config, model, loaders):
         super().__init__()
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-        self.config = hparams
+        self.config = config
         self.model = model
         self.model.to(self.device)
         self.loaders = loaders
@@ -35,19 +36,22 @@ class Trainer():
 
         self.best_val_loss   = float('inf')
 
-        self.angle_binner    = partial(discretize, start=-1, end=1,
-                                    number_of_bins=hparams.angle_pred_number_of_bins)
-        self.distance_binner = partial(discretize, start=3, end=hparams.distance_pred_max_radius,
-                                    number_of_bins=hparams.distance_pred_number_of_bins)
+        self.binners = dict()
+        self.binners['distance'] = partial(discretize, start=3, end=config.distance_pred_max_radius,
+                                        number_of_bins=config.distance_pred_number_of_bins)
+        self.predict_angles = config.predict_angles
+        if self.predict_angles:
+            self.binners['angles'] = partial(discretize, start=-1, end=1,
+                                        number_of_bins=config.angle_pred_number_of_bins)
 
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
-        self.accumulation = hparams.accumulate_every
+        self.accumulation = config.accumulate_every
 
     def train(self):
         for epoch in range(self.config.max_epochs):
             epoch_metrics = self.evaluate(TRAIN_DATASETS[0], epoch)
 
-            if epoch > self.config.validation_start:
+            if epoch >= self.config.validation_start:
                 if epoch % self.config.validation_check_rate == 0:
                     for split in VALIDATION_DATASETS:
                         epoch_metrics.update(self.evaluate(split, epoch))
@@ -81,11 +85,12 @@ class Trainer():
                     batch_predictions = self.model(batch, is_training=is_training)
 
                     (metrics, prediction_alignments,
-                        prediction_images) = self.evaluate_predictions(batch, batch_predictions, is_training)
+                        prediction_images) = self.evaluate_predictions(batch, batch_predictions, split_name, batch_idx)
 
                     loss = metrics['loss'] = (
-                        self.config.topography_loss_coeff * metrics['dist_xentropy'] +
-                        self.config.arrangement_loss_coeff * metrics['fape']
+                        self.config.distogram_coefficient * metrics['distance xentropy'] +
+                        self.config.anglegram_coefficient * metrics['angular xentropy'] +
+                        self.config.fape_coefficient * metrics['fape']
                     )
 
                     accumulation += 1
@@ -98,7 +103,7 @@ class Trainer():
                         accumulation = 0
                         accumulated_loss = 0
 
-                    if is_testing and batch_idx == 0:
+                    if is_testing and batch_idx < self.config.num_test_visual_samples:
                         if prediction_alignments: self.plot_alignments(batch, prediction_alignments)
                         if prediction_images: self.plot_images(prediction_images)
 
@@ -116,95 +121,133 @@ class Trainer():
         return epoch_metrics
 
 
-    def evaluate_predictions(self, batch, predictions, is_training=False):
+    def evaluate_predictions(self, batch, predictions, split, batch_idx):
         metrics, alignments, images = defaultdict(float), dict(), dict()
 
         if 'logit_traj' in predictions:
-            topography_metrics, images = self.evaluate_topography_predictions(
+            distogram_metrics, images, permutations = self.evaluate_distograms(
                 batch,
                 predictions['logit_traj'],
+                split in TEST_DATASETS and batch_idx < self.config.num_test_visual_samples
             )
-            metrics.update(topography_metrics)
+            metrics.update(distogram_metrics)
+        else:
+            permutations = torch.zeros_like(batch.seqs.size(0), device=batch.seqs.device)
 
         if ('translations' in predictions) and ('rotations' in predictions):
-            metrics['fape'] = fape_loss(batch, predictions['translations'], predictions['rotations'], max_val=self.config.fape_max_val)
+            permutation_mask = torch.stack((permutations.bool(), ~(permutations.bool())), dim=-1)
+            translations = rearrange(batch.tgt_crds, 'b ... c s -> b s ... c')[permutation_mask]
+            rotations = rearrange(batch.tgt_rots, 'b ... i j s -> b s ... i j')[permutation_mask]
 
-            if not is_training:
+            metrics['fape'] = fape_loss(translations, rotations, predictions['translations'], predictions['rotations'],
+                                        mask=batch.node_pad_mask, edge_index=batch.edge_index, max_val=self.config.fape_max_val)
+
+            if not (split in TRAIN_DATASETS):
                 structural_metrics, alignments = self.evaluate_arrangement_predictions(
-                    batch, predictions['translations'], is_training
+                    batch, translations, predictions['translations']
                 )
                 metrics.update(structural_metrics)
 
         return metrics, alignments, images
 
 
-    def evaluate_topography_predictions(self, batch, distance_logits_trajectory):
+    def evaluate_distograms(self, batch, logits_trajectory, fetch_images):
         metrics = defaultdict(int)
 
+        # house keeping
         external_edges = (rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()'))
         external_edges &= batch.edge_pad_mask
 
-        distance_ground = batch.edge_distance[external_edges]
-        distance_labels = self.distance_binner(distance_ground)
+        distance_ground = batch.edge_distance
+        distance_labels_all = self.binners['distance'](distance_ground)
 
         batch_images = defaultdict(list)
-        trajectory_len = len(distance_logits_trajectory)
+        trajectory_len = logits_trajectory['distance'].size(1)
 
-        for t, distance_logits in enumerate(distance_logits_trajectory):
-            dist_xentropy = F.cross_entropy(
-                distance_logits[batch.edge_record_mask[external_edges]],
-                distance_labels[batch.edge_record_mask[external_edges]]
-            )
+        edge_mask = batch.edge_record_mask & external_edges
 
-            dist_acc = (distance_logits.argmax(-1) == distance_labels).float().mean()
+        # main loss is mean cross_entropy across layers:
+        trajectory_mask = repeat(edge_mask, 'b ... -> b t ...', t=trajectory_len)
+        trajectory_labels = repeat(distance_labels_all, 'b ... -> b t ...', t=trajectory_len)
+        trajectory_labels[~trajectory_mask] = IGNORE_IDX
 
-            metrics[f'dist_xentropy'] += dist_xentropy / trajectory_len
-            metrics[f'dist_acc'] +=  dist_acc / trajectory_len
+        # expand logits to consider homomeric symmetry
+        distance_logits = repeat(logits_trajectory['distance'], '... l -> ... s l', s=2)
+        distance_logits = rearrange(distance_logits, 'b ... l -> b l ...')
 
-            probabilities = distance_logits.softmax(-1)
-            values = torch.linspace(0, self.config.distance_pred_max_radius,
-                        self.config.distance_pred_number_of_bins, device=distance_logits.device)
-            expectation = (probabilities * values.unsqueeze(0)).sum(-1)
+        # use solution that provides the best cross entropy for distogram loss
+        xentropy = F.cross_entropy(distance_logits, trajectory_labels, reduction='none', ignore_index=IGNORE_IDX)
+        xentropy = xentropy.sum((1, 2, 3)) / trajectory_mask.sum((1, 2, 3))[..., None]
+        xentropy, permuted = xentropy.min(dim=-1)
+        xentropy = xentropy.mean()
 
-            pred_contacts = expectation < self.config.contact_cut
-            ground_contacts = distance_ground < self.config.contact_cut
+        permutation_mask = torch.stack((permuted.bool(), ~(permuted.bool())), dim=-1)
+        trajectory_labels = rearrange(trajectory_labels, 'b ... s -> b s ...')[permutation_mask]
 
-            true_positives  = (pred_contacts & ground_contacts).sum()
-            false_positives = (pred_contacts & ~ground_contacts).sum()
-            false_negatives = (~pred_contacts & ground_contacts).sum()
+        dist_acc = (logits_trajectory['distance'][trajectory_mask].argmax(-1) == trajectory_labels[trajectory_mask]).float().mean()
 
-            contact_precision = (true_positives / (true_positives + false_positives + eps))
-            contact_recall = (true_positives / (true_positives + false_negatives + eps))
+        metrics[f'distance xentropy'] = xentropy
+        metrics[f'distance accuracy'] = dist_acc
 
-            metrics[f'contact_precision'] =  contact_precision / trajectory_len
-            metrics[f'contact_recall']    =  contact_recall / trajectory_len
+        # deal with angles
+        if self.predict_angles:
+            angles_ground = rearrange(batch.edge_angles, 'b ... s a -> b s ... a')
+            angles_ground = angles_ground[permutation_mask]
+            angles_labels = repeat(self.binners['angles'](angles_ground), 'b ... -> b t ...', t=trajectory_len)
+            angles_logits = rearrange(logits_trajectory['angles'], '... (a l) -> ... l a', a=3)
+            angles_labels[~trajectory_mask] = IGNORE_IDX
+            angles_labels[trajectory_labels == self.config.distance_pred_number_of_bins - 1] = IGNORE_IDX
+            angular_xentropy = F.cross_entropy(rearrange(angles_logits, 'b ... l a -> b l ... a'), angles_labels, ignore_index=IGNORE_IDX)
+            angles_labels[trajectory_labels == self.config.distance_pred_number_of_bins - 1] = self.config.angle_pred_number_of_bins / 2
+            metrics[f'angular xentropy'] = angular_xentropy
 
-            batch_size, seq_len, _ = batch.edge_record_mask.size()
-            edge_batches = repeat(torch.arange(0, batch_size), 'b -> b s z', s=seq_len, z=seq_len)
-            edge_batches = edge_batches[external_edges]
+        # Now we evaluate final layer's predictions
+        distance_logits = logits_trajectory['distance'][:, -1, ...]
+        distance_labels = trajectory_labels[:, -1, ...]
 
-            for batch_idx, id in enumerate(batch.ids):
-                batch_filter = edge_batches == batch_idx
-                images = [img[batch_filter].detach() for img in
-                    (distance_labels, expectation, ground_contacts.float(), pred_contacts.float())]
-                images = [img[:int(len(img)/2)] for img in images]
+        terminal_xentropy = F.cross_entropy(rearrange(distance_logits, 'b ... l -> b l ...'), distance_labels, ignore_index=IGNORE_IDX)
+        metrics['terminal distance xentropy'] = terminal_xentropy
 
-                chains = batch.chns[batch.node_pad_mask][batch.batch == batch_idx]
-                n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
-                images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
+        terminal_acc = (distance_logits[edge_mask].argmax(-1) == distance_labels[edge_mask]).float().mean()
+        metrics['terminal distance accuracy'] = terminal_acc
 
-                batch_images[id].append(images)
+        expectation = logit_expectation(distance_logits)
+        pred_contacts = expectation < self.config.contact_cut
+        ground_contacts = distance_labels < self.config.contact_cut
 
-            if t == trajectory_len - 1:
-                metrics[f'final_dist_xentropy'] = dist_xentropy
-                metrics[f'final_dist_acc'] =  dist_acc
-                metrics[f'final_contact_precision'] = contact_precision
-                metrics[f'final_contact_recall'] = contact_recall
+        true_positives  = (pred_contacts & ground_contacts & edge_mask).sum()
+        false_positives = (pred_contacts & ~ground_contacts & edge_mask).sum()
+        false_negatives = (~pred_contacts & ground_contacts & edge_mask).sum()
 
-        return metrics, batch_images
+        contact_precision = (true_positives / (true_positives + false_positives + eps))
+        contact_recall = (true_positives / (true_positives + false_negatives + eps))
+
+        metrics[f'contact precision'] =  contact_precision
+        metrics[f'contact recall']    =  contact_recall
+
+        if not fetch_images: return metrics, batch_images, permuted
+
+        candidate_images = [distance_labels, expectation, -ground_contacts.float(), -pred_contacts.float()]
+
+        if self.predict_angles:
+            for angle_idx in range(3):
+                angle_ground = angles_labels[:, 0, ..., angle_idx]
+                angle_prediction = logit_expectation(angles_logits[:, 0, ..., angle_idx])
+                angle_prediction[distance_logits.argmax(-1) >= self.config.distance_pred_number_of_bins - 2] = self.config.angle_pred_number_of_bins / 2
+                candidate_images.extend([angle_ground, angle_prediction])
+
+        for batch_idx, (chains, id, mask) in enumerate(zip(batch.chns, batch.ids, edge_mask)):
+            images = [img[batch_idx].detach() for img in candidate_images]
+            images = [img[mask] for img in images]
+            images = [img[:int(len(img)/2)] for img in images]
+            n, m = (chains == chains[0]).sum(), len(chains) - (chains == chains[0]).sum()
+            images = [rearrange(img, '(n m) -> n m', n=n, m=m).cpu() for img in images]
+            batch_images[id].append(images)
+
+        return metrics, batch_images, permuted
 
 
-    def evaluate_arrangement_predictions(self, batch, traj, is_training):
+    def evaluate_arrangement_predictions(self, batch, tgt_crds, traj):
         node_mask = batch.node_pad_mask & batch.node_record_mask
         traj = rearrange(traj, 'b n t e -> b t n e')
         batch_size, trajectory_len, _, _ = traj.size()
@@ -213,10 +256,8 @@ class Trainer():
         metrics = defaultdict(int)
 
         for id, angles, gnd_wrap, pred_traj, chains, mask in zip(batch.ids, batch.angs,
-                                batch.tgt_crds[:, :, 1, :], traj, batch.chns, node_mask):
+                                            tgt_crds, traj, batch.chns, node_mask):
             gnd_wrap, angles, chains = gnd_wrap[mask], angles[mask], chains[mask]
-
-            pred_traj = pred_traj[-1:] if is_training else pred_traj
 
             for step, pred_wrap in enumerate(pred_traj):
                 pred_wrap = pred_wrap[mask]
@@ -229,7 +270,6 @@ class Trainer():
                 for k, metric in alignment_metrics.items():
                     metrics[k] += metric.mean() / len(pred_traj) / batch_size
 
-                # alignment_metrics['violation_loss'] = ca_trace_viol_loss(pred_wrap)
                 alignments[id][f'trajectory'].append((align_gnd_coors.detach().cpu(),
                                                       pred_wrap.detach().cpu(),
                                                       angles.cpu()))
@@ -238,7 +278,7 @@ class Trainer():
                     metrics[k] += metric.mean() / len(pred_traj) / batch_size
 
             if len(pred_traj) > 1 and step == len(pred_traj) -1:
-                for k, metric in chain_alignment_metrics.items():
+                for k, metric in alignment_metrics.items():
                     metrics[f'final_{k}'] += metric.mean() / batch_size
 
         return metrics, alignments
@@ -247,7 +287,7 @@ class Trainer():
     def plot_images(self, images):
         for id, img_trajectory in images.items():
             for imgs in img_trajectory:
-                prediction_figure = plot_predictions(*imgs)
+                prediction_figure = plot_predictions(imgs)
                 if wandb.run:
                     wandb.log({
                         f'{id} at topography prediction': prediction_figure,

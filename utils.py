@@ -33,12 +33,11 @@ def ca_trace_viol_loss(ca_trace, next_d=3.80, other_d=4.0, next_term=3.):
     viol_loss = next_term*next_loss + clash_loss
     return viol_loss
 
-def fape_loss(batch, pred_translations, pred_rotations, max_val=10., l_func=None, epsilon=1e-4):
+def fape_loss(translations, rotations, pred_translations, pred_rotations, mask, edge_index, max_val=10., l_func=None, epsilon=1e-4):
     if l_func is None: l_func = lambda x, y, eps=1e-7, sup = max_val: (((x-y)**2).sum(dim=-1) + eps).sqrt()
-    mask = batch.node_pad_mask
-    true_translations, true_rotations = batch.tgt_crds[..., 1, :][mask], batch.rots[mask]
+    true_translations, true_rotations = translations[mask], rotations[mask]
     pred_translations, pred_rotations = pred_translations[mask], pred_rotations[mask]
-    i, j = batch.edge_index
+    i, j = edge_index
     xij_hat = torch.einsum('b t p, b t p q -> b t q', pred_translations[j] - pred_translations[i], pred_rotations[i])
     xij = torch.einsum('b p, b p q -> b q', true_translations[j] - true_translations[i], true_rotations[i])
     xij = repeat(xij, 'b q -> b t q', t=xij_hat.size(1))

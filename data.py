@@ -35,7 +35,7 @@ from copy import deepcopy
 
 TRAIN_DATASETS = ['train']
 TEST_DATASETS = ['test']
-VALIDATION_DATASETS = []
+VALIDATION_DATASETS = ['val']
 
 DATASETS = TRAIN_DATASETS + VALIDATION_DATASETS + TEST_DATASETS
 
@@ -62,16 +62,33 @@ def create_dataloaders(config):
         data = pickle.load(file)
         print(f'{time.time() - start:.2f} seconds to load dataset')
 
+
+    num_train_proteins = len(data['train']['seq'])
+    train_filter = torch.rand(num_train_proteins) > config.validation_ratio
+
+    train_idx = (train_filter).float().nonzero().flatten()
+    val_idx = (~train_filter).float().nonzero().flatten()
+
+    train, val = dict(), dict()
+    for key, attribute in data['train'].items():
+        train[key] = list(map(attribute.__getitem__, train_idx))
+        val[key] = list(map(attribute.__getitem__, val_idx))
+
+    data['train'] = train
+    data['val'] = val
+
     loaders = {
         split: ProteinComplexDataset(
            dataset,
            split_name=split,
            dataset_source=config.dataset_source,
+           spatial_clamp=config.spatial_clamp,
            downsample=config.downsample,
            max_seq_len=config.max_seq_len,
-        ).make_loader(config.batch_size, config.num_workers)
+        ).make_loader(config.batch_size if split not in TEST_DATASETS else 1, config.num_workers)
         for split, dataset in data.items()
     }
+
     return loaders
 
 class ProteinComplexDataset(torch.utils.data.Dataset):
@@ -103,8 +120,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             for key, attribute in scn_data_split.items():
                 scn_data_split[key] = list(map(attribute.__getitem__, random_filter))
 
-            length_filter = [idx for idx, seq in enumerate(scn_data_split['seq'])
-                                                if len(seq) < self.max_seq_len]
+            length_filter = [idx for idx, seq in enumerate(scn_data_split['seq']) if len(seq) < self.max_seq_len]
             for key, attribute in scn_data_split.items():
                 scn_data_split[key] = list(map(attribute.__getitem__, length_filter))
 
@@ -116,8 +132,6 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.chns = scn_data_split['chn']
         self.encs = scn_data_split['enc']
         self.ids = scn_data_split['ids']
-        self.resolutions = scn_data_split['res']
-        self.secs = [DSSP_VOCAV.str2ints(s, add_sos_eos) for s in scn_data_split['sec']]
 
         self.split_name = split_name
         self.spatial_clamp = spatial_clamp
@@ -137,18 +151,18 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         chains = chains.float() + 1
 
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
-        tgt_crds = crds.clone()
-        rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
-
+        tgt_rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
         backbone_coords = crds[:, 1, :]
+        tgt_crds = backbone_coords.clone()
+
         distance_map = torch.cdist(backbone_coords, backbone_coords)
 
         edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
 
         v, u = edge_index
         edge_vectors = torch.einsum('b p, b p q -> b q', backbone_coords[u] - backbone_coords[v],
-                                                         rots[v].transpose(-1, -2))
+                                                         tgt_rots[v].transpose(-1, -2))
         edge_angles = F.normalize(edge_vectors, dim=-1)
 
         subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
@@ -156,7 +170,8 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
         subunit2 = crds[chains == 2] - crds[chains == 2].mean(dim=-3)
         crds[chains == 2] = torch.einsum('b a p, p q -> b a q', subunit2, random_rotation().t())
-        crds[chains == 2] = crds[chains == 2] # + torch.FloatTensor([50, 50, 50])[None, :]
+
+        rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
         backbone_coords = crds[:, 1, :]
 
         datum = Data(
@@ -165,6 +180,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             ids=self.ids[idx],
             crds=crds,
             tgt_crds=tgt_crds,
+            tgt_rots=tgt_rots,
             bck_crds=backbone_coords,
             rots=rots,
             chns=chains,
@@ -178,8 +194,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             edge_angles=edge_angles
         )
 
-        if self.spatial_clamp > 0 and datum.__num_nodes__ > self.spatial_clamp:
-            # pick a contact
+        if self.spatial_clamp > 0 and datum.__num_nodes__ > self.spatial_clamp and self.split_name not in TEST_DATASETS:
             is_external = chains[v] != chains[u]
             contacts = datum.edge_index[:, (datum.edge_distance < 12) & is_external].T
             sample_idx = random.sample(range(len(contacts)), k=1)[0]
@@ -198,6 +213,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
             datum.crds = datum.crds[nodes_filter]
             datum.tgt_crds = datum.tgt_crds[nodes_filter]
+            datum.tgt_rots = datum.tgt_rots[nodes_filter]
             datum.bck_crds=datum.bck_crds[nodes_filter]
             datum.rots=datum.rots[nodes_filter]
             datum.chns=datum.chns[nodes_filter]
@@ -215,6 +231,41 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
             datum.edge_index = edge_index
             datum.__num_nodes__ = datum.num_nodes = nodes_filter.sum().item()
+
+        # note that symmetry is barely broken when n, m ~= 128 but n, m < 128
+        # homomeric encoding happens after the cut
+        chain1, chain2 = datum.chns == 1, datum.chns == 2
+        is_homomeric = ((chain1.sum().item() == chain2.sum().item()) and
+                        torch.all(datum.seqs[chain1] == datum.seqs[chain2]))
+        datum.homo = torch.BoolTensor([is_homomeric])
+
+        if is_homomeric:
+            first, last = datum.chns[0], datum.chns[-1]
+            original_coords = datum.tgt_crds
+            alternate_crds = original_coords[datum.chns == last], original_coords[datum.chns == first]
+            alternate_crds = torch.cat(alternate_crds, dim=0)
+            alternate_distance_map = torch.cdist(alternate_crds, alternate_crds)
+            alternate_edge_distance = alternate_distance_map[datum.edge_index[0], datum.edge_index[1]]
+
+            alternate_rots = (datum.tgt_rots[datum.chns == last], datum.tgt_rots[datum.chns == last])
+            alternate_rots = torch.cat(alternate_rots, dim=0)
+
+            datum.edge_distance = torch.stack((datum.edge_distance, alternate_edge_distance), dim=-1)
+
+            datum.tgt_crds = torch.stack((datum.tgt_crds, alternate_crds), dim=-1)
+            datum.tgt_rots = torch.stack((datum.tgt_rots, alternate_rots), dim=-1)
+
+            v, u = datum.edge_index
+            alternate_edge_vectors = torch.einsum('b p, b p q -> b q', alternate_crds[u] - alternate_crds[v],
+                                                             alternate_rots[v].transpose(-1, -2))
+            alternate_edge_angles = F.normalize(alternate_edge_vectors, dim=-1)
+            datum.edge_angles = torch.stack((datum.edge_angles, alternate_edge_angles), dim=-2)
+
+        else:
+            datum.edge_distance = torch.stack((datum.edge_distance, datum.edge_distance), dim=-1)
+            datum.tgt_crds = torch.stack((datum.tgt_crds, datum.tgt_crds), dim=-1)
+            datum.tgt_rots = torch.stack((datum.tgt_rots, datum.tgt_rots), dim=-1)
+            datum.edge_angles = torch.stack((datum.edge_angles, datum.edge_angles), dim=-2)
 
         datum = deepcopy(datum)
         if (datum.crds[:, 1, :].norm(dim=-1).gt(1e-6) & datum.crds[:, 1, 0].isfinite()).sum() < 10:
@@ -243,7 +294,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
 def collate_fn(stream):
     batch = Batch.from_data_list(stream)
-    for key in ('seqs', 'tgt_crds', 'crds', 'bck_crds', 'angs', 'rots', 'chns', 'encs'):
+    for key in ('seqs', 'tgt_crds', 'tgt_rots', 'crds', 'bck_crds', 'angs', 'rots', 'chns', 'encs'):
         if batch[key] is None: continue
         batch[key], mask = to_dense_batch(batch[key], batch=batch.batch)
     for key in ('edge_distance', 'edge_angles'):
@@ -258,6 +309,6 @@ def collate_fn(stream):
     # used for losses
     batch.node_record_mask = batch.crds[:, :, 1].norm(dim=-1).gt(1e-6) & batch.crds[:, :, 1, 0].isfinite()
     batch.angle_record_mask = batch.angs.ne(0.0) & batch.angs.isfinite()
-    batch.edge_record_mask = batch.edge_distance.gt(0) & batch.edge_angles.sum(-1).ne(0)
+    batch.edge_record_mask = batch.edge_distance[..., 0].gt(0) & batch.edge_angles[..., 0, :].sum(-1).ne(0)
 
     return batch

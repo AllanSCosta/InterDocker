@@ -26,12 +26,12 @@ plt.rcParams.update({
 })
 
 
-def plot_predictions(dist, pred_dist, conct, pred_conct):
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-    for idx, img in enumerate([dist, pred_dist]):
-        axes[0][idx].imshow(-img)
-    for idx, img in enumerate([conct, pred_conct]):
-        axes[1][idx].imshow(img)
+def plot_predictions(imgs):
+    num_pairs = int(len(imgs)/2)
+    fig, axes = plt.subplots(2, num_pairs, figsize=(2 * num_pairs, 4))
+    for idx in range(num_pairs):
+        axes[0][idx].imshow(-imgs[2 * idx])
+        axes[1][idx].imshow(-imgs[2 * idx + 1])
     return fig
 
 
