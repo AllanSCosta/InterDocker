@@ -3,10 +3,10 @@ import os
 from functools import partial
 from collections import defaultdict
 
+
+from torch.nn.functional import cross_entropy
 import numpy as np
 import torch
-import torch.nn.functional as F
-
 import wandb
 from tqdm import tqdm
 from visualization import plot_aligned_timeseries, plot_aligned_structures, plot_predictions
@@ -16,6 +16,7 @@ from utils import discretize, point_in_circum_to_angle, logit_expectation, get_a
 from mp_nerf.protein_utils import get_protein_metrics
 from copy import deepcopy
 from einops import repeat, rearrange
+
 eps = 1e-7
 IGNORE_IDX = -100
 
@@ -124,27 +125,35 @@ class Trainer():
     def evaluate_predictions(self, batch, predictions, split, batch_idx):
         metrics, alignments, images = defaultdict(float), dict(), dict()
 
+        should_fetch_results = split in TEST_DATASETS and batch_idx < self.config.num_test_visual_samples
+
+        # ===== EVALUATE DISTOGRAM PREDICTIONS ======
         if 'logit_traj' in predictions:
             distogram_metrics, images, permutations = self.evaluate_distograms(
                 batch,
                 predictions['logit_traj'],
-                split in TEST_DATASETS and batch_idx < self.config.num_test_visual_samples
+                should_fetch_results
             )
             metrics.update(distogram_metrics)
         else:
             permutations = torch.zeros_like(batch.seqs.size(0), device=batch.seqs.device)
 
+
+        # ===== EVALUATE STRUCTURAL PREDICTIONS ======
         if ('translations' in predictions) and ('rotations' in predictions):
+            # penalize fape based on distogram predictions' permutations
             permutation_mask = torch.stack((permutations.bool(), ~(permutations.bool())), dim=-1)
             translations = rearrange(batch.tgt_crds, 'b ... c s -> b s ... c')[permutation_mask]
             rotations = rearrange(batch.tgt_rots, 'b ... i j s -> b s ... i j')[permutation_mask]
 
+            # ===== FAPE ======
             metrics['fape'] = fape_loss(translations, rotations, predictions['translations'], predictions['rotations'],
                                         mask=batch.node_pad_mask, edge_index=batch.edge_index, max_val=self.config.fape_max_val)
 
+            # ===== GENERAL PROTEIN METRICS ======
             if not (split in TRAIN_DATASETS):
-                structural_metrics, alignments = self.evaluate_arrangement_predictions(
-                    batch, translations, predictions['translations']
+                structural_metrics, alignments = self.evaluate_coordinate_predictions(
+                    batch, translations, predictions['translations'], should_fetch_results,
                 )
                 metrics.update(structural_metrics)
 
@@ -175,8 +184,8 @@ class Trainer():
         distance_logits = repeat(logits_trajectory['distance'], '... l -> ... s l', s=2)
         distance_logits = rearrange(distance_logits, 'b ... l -> b l ...')
 
-        # use solution that provides the best cross entropy for distogram loss
-        xentropy = F.cross_entropy(distance_logits, trajectory_labels, reduction='none', ignore_index=IGNORE_IDX)
+        # use ground solution that provides the best cross entropy for distogram loss
+        xentropy = cross_entropy(distance_logits, trajectory_labels, reduction='none', ignore_index=IGNORE_IDX)
         xentropy = xentropy.sum((1, 2, 3)) / trajectory_mask.sum((1, 2, 3))[..., None]
         xentropy, permuted = xentropy.min(dim=-1)
         xentropy = xentropy.mean()
@@ -184,12 +193,13 @@ class Trainer():
         permutation_mask = torch.stack((permuted.bool(), ~(permuted.bool())), dim=-1)
         trajectory_labels = rearrange(trajectory_labels, 'b ... s -> b s ...')[permutation_mask]
 
-        dist_acc = (logits_trajectory['distance'][trajectory_mask].argmax(-1) == trajectory_labels[trajectory_mask]).float().mean()
+        dist_acc = (logits_trajectory['distance'][trajectory_mask].argmax(-1) ==
+                                        trajectory_labels[trajectory_mask]).float().mean()
 
         metrics[f'distance xentropy'] = xentropy
         metrics[f'distance accuracy'] = dist_acc
 
-        # deal with angles
+        # consider angles
         if self.predict_angles:
             angles_ground = rearrange(batch.edge_angles, 'b ... s a -> b s ... a')
             angles_ground = angles_ground[permutation_mask]
@@ -197,7 +207,11 @@ class Trainer():
             angles_logits = rearrange(logits_trajectory['angles'], '... (a l) -> ... l a', a=3)
             angles_labels[~trajectory_mask] = IGNORE_IDX
             angles_labels[trajectory_labels == self.config.distance_pred_number_of_bins - 1] = IGNORE_IDX
-            angular_xentropy = F.cross_entropy(rearrange(angles_logits, 'b ... l a -> b l ... a'), angles_labels, ignore_index=IGNORE_IDX)
+            angular_xentropy = cross_entropy(
+                rearrange(angles_logits, 'b ... l a -> b l ... a'),
+                angles_labels,
+                ignore_index=IGNORE_IDX
+            )
             angles_labels[trajectory_labels == self.config.distance_pred_number_of_bins - 1] = self.config.angle_pred_number_of_bins / 2
             metrics[f'angular xentropy'] = angular_xentropy
 
@@ -205,12 +219,19 @@ class Trainer():
         distance_logits = logits_trajectory['distance'][:, -1, ...]
         distance_labels = trajectory_labels[:, -1, ...]
 
-        terminal_xentropy = F.cross_entropy(rearrange(distance_logits, 'b ... l -> b l ...'), distance_labels, ignore_index=IGNORE_IDX)
+        terminal_xentropy = cross_entropy(
+            rearrange(distance_logits, 'b ... l -> b l ...'),
+            distance_labels,
+            ignore_index=IGNORE_IDX
+        )
+
         metrics['terminal distance xentropy'] = terminal_xentropy
 
-        terminal_acc = (distance_logits[edge_mask].argmax(-1) == distance_labels[edge_mask]).float().mean()
+        terminal_acc = (distance_logits[edge_mask].argmax(-1)
+                            == distance_labels[edge_mask]).float().mean()
         metrics['terminal distance accuracy'] = terminal_acc
 
+        # evaluate contact prediction metrics
         expectation = logit_expectation(distance_logits)
         pred_contacts = expectation < self.config.contact_cut
         ground_contacts = distance_labels < self.config.contact_cut
@@ -227,7 +248,9 @@ class Trainer():
 
         if not fetch_images: return metrics, batch_images, permuted
 
-        candidate_images = [distance_labels, expectation, -ground_contacts.float(), -pred_contacts.float()]
+        # ordering is [label1, prediction1, label2, prediction2, ...]
+        candidate_images = [distance_labels, expectation,
+                    -ground_contacts.float(), -pred_contacts.float()]
 
         if self.predict_angles:
             for angle_idx in range(3):
@@ -236,6 +259,7 @@ class Trainer():
                 angle_prediction[distance_logits.argmax(-1) >= self.config.distance_pred_number_of_bins - 2] = self.config.angle_pred_number_of_bins / 2
                 candidate_images.extend([angle_ground, angle_prediction])
 
+        # some nice array slicing to fetch images
         for batch_idx, (chains, id, mask) in enumerate(zip(batch.chns, batch.ids, edge_mask)):
             images = [img[batch_idx].detach() for img in candidate_images]
             images = [img[mask] for img in images]
@@ -247,24 +271,32 @@ class Trainer():
         return metrics, batch_images, permuted
 
 
-    def evaluate_arrangement_predictions(self, batch, tgt_crds, traj):
+    def evaluate_coordinate_predictions(self, batch, tgt_crds, trajectory, evaluate_full_trajectory):
         node_mask = batch.node_pad_mask & batch.node_record_mask
-        traj = rearrange(traj, 'b n t e -> b t n e')
+        traj = rearrange(trajectory, 'b n t e -> b t n e')
         batch_size, trajectory_len, _, _ = traj.size()
 
         alignments = defaultdict(lambda: defaultdict(list))
         metrics = defaultdict(int)
 
+        # ======= ITERATE THROUGH BATCH  =======
         for id, angles, gnd_wrap, pred_traj, chains, mask in zip(batch.ids, batch.angs,
                                             tgt_crds, traj, batch.chns, node_mask):
             gnd_wrap, angles, chains = gnd_wrap[mask], angles[mask], chains[mask]
 
+            # in validation we only evaluate the final step
+            pred_traj = pred_traj[-2:-1] if not evaluate_full_trajectory else pred_traj
+
+            # ======= ITERATE THROUGH TRAJECTORY  =======
             for step, pred_wrap in enumerate(pred_traj):
                 pred_wrap = pred_wrap[mask]
 
+                # ======= DATA IS PROCESSED TO BE LEFT-HANDED  =======
                 rotation, translation = kabsch_torch(pred_wrap, gnd_wrap)
-                align_gnd_coors = torch.einsum('i p , p q -> i q', gnd_wrap, rotation.t()) + translation[None, :]
+                align_gnd_coors =  (translation[None, :] +
+                        torch.einsum('i p , p q -> i q', gnd_wrap, rotation.t()))
 
+                # ======= COMPUTE METRICS =======
                 alignment_metrics = get_alignment_metrics(align_gnd_coors, pred_wrap)
 
                 for k, metric in alignment_metrics.items():
@@ -279,7 +311,7 @@ class Trainer():
 
             if len(pred_traj) > 1 and step == len(pred_traj) -1:
                 for k, metric in alignment_metrics.items():
-                    metrics[f'final_{k}'] += metric.mean() / batch_size
+                    metrics[f'terminal_{k}'] += metric.mean() / batch_size
 
         return metrics, alignments
 

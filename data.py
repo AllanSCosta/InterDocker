@@ -151,13 +151,12 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         chains = chains.float() + 1
 
         crds = torch.FloatTensor(self.crds[idx]).reshape(-1, 14, 3)
+        crds = ensure_chirality(crds.unsqueeze(0)).squeeze(0)
         tgt_rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
 
         backbone_coords = crds[:, 1, :]
         tgt_crds = backbone_coords.clone()
-
         distance_map = torch.cdist(backbone_coords, backbone_coords)
-
         edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
 
         v, u = edge_index
@@ -165,9 +164,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
                                                          tgt_rots[v].transpose(-1, -2))
         edge_angles = F.normalize(edge_vectors, dim=-1)
 
+        # move chains to origin and random rotate
         subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
         crds[chains == 1] = torch.einsum('b a p, p q -> b a q', subunit1, random_rotation().t())
-
         subunit2 = crds[chains == 2] - crds[chains == 2].mean(dim=-3)
         crds[chains == 2] = torch.einsum('b a p, p q -> b a q', subunit2, random_rotation().t())
 
