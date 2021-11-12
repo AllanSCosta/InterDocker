@@ -156,6 +156,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
         backbone_coords = crds[:, 1, :]
         tgt_crds = backbone_coords.clone()
+
         distance_map = torch.cdist(backbone_coords, backbone_coords)
         edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
 

@@ -69,12 +69,10 @@ class Interactoformer(nn.Module):
     def forward(self, batch, is_training):
         output = {}
 
-        # utils
         node_pad_mask = batch.node_pad_mask
         edge_pad_mask = batch.edge_pad_mask
         batch_size, seq_len = batch.seqs.size()
         device = batch.seqs.device
-
 
         # ====== EMBED SEQUENCE ======
         if self.sequence_embed: sequence = self.node_seq_emb(batch.encs)
@@ -95,6 +93,7 @@ class Interactoformer(nn.Module):
         chains = self.chain_emb(batch.chns.type(torch.long))
 
 
+        # BASE NODE REPRESENTATION
         # =========================
         nodes = sequence + dihedrals + chains
         # =========================
@@ -116,10 +115,9 @@ class Interactoformer(nn.Module):
         angle_signal[edge_distance < max_radius] = 0
 
 
-        # ====== DEFINE INTERNAL EDGES  ======
+        # ====== BASE INTERNAL EDGES REPRESENTATION  ======
         edge_structural_signal = torch.cat((dist_signal, angle_signal), dim=-1)
         edges[internal_edge_mask] = self.to_internal_edge(edge_structural_signal[internal_edge_mask])
-
 
         if self.structure_only:
             # if we are only dealing with structure docking, we give the distogram solution
@@ -127,10 +125,10 @@ class Interactoformer(nn.Module):
             edges = edges + external_edges * external_edge_mask[..., None]
         else:
 
-            # ====== INDEPENDENT ENCODING ======
-            nodes = nodes + self.encoder(nodes, edges, batch.bck_crds, batch.rots, internal_edge_mask)
+            # ====== INDEPENDENT ENCODING ENRICHES NODES ======
+            nodes = self.encoder(nodes, edges, batch.bck_crds, batch.rots, internal_edge_mask)
 
-            # ====== MUTUAL ENCODING ======
+            # ====== MUTUAL ENCODING ENRICHES EXTERNAL EDGES ======
             cross_encodings, edges, logits_trajectory = self.cross_encoder(
                 nodes, edges, batch.bck_crds, batch.rots,
                 internal_edge_mask,
@@ -147,10 +145,8 @@ class Interactoformer(nn.Module):
         # ====== BLACK HOLE INIT ======
         coors = torch.zeros_like(batch.bck_crds, device=batch.bck_crds.device)
         rots = repeat(torch.eye(3), '... -> b s ...', b = batch_size, s = seq_len).to(batch.rots.device)
-        rots, coors = rots.clone().detach(), coors.clone().detach()
 
-
-        # ====== FAST FORWARD ======
+        # ====== GRADIENTLESS FAST FORWARD ======
         with torch.no_grad():
             if is_training and self.unroll_steps:
                 batch_steps = torch.randint(0, self.unroll_steps, [batch_size])
@@ -164,7 +160,6 @@ class Interactoformer(nn.Module):
                     rots[chosen] = rotations_timeseries[-1]
                     coors[chosen] = translations_timeseries[-1]
 
-
         # ====== DOCKING ======
         translations, rotations  = [ coors ], [ rots ]
         for _ in range(1 if is_training else self.eval_steps):
@@ -173,7 +168,6 @@ class Interactoformer(nn.Module):
             rotations.extend(rotations_timeseries)
             rots = rotations_timeseries[-1].detach()
             coors = translations_timeseries[-1].detach()
-
 
         output['translations'] = rearrange(torch.stack(translations, dim=0), 't b n e -> b n t e')
         output['rotations'] = rearrange(torch.stack(rotations, dim=0), 't b n p q -> b n t p q')

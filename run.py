@@ -13,7 +13,6 @@ from model import Interactoformer
 
 from utils import submit_script
 
-
 import argparse
 
 if __name__ == '__main__':
@@ -57,7 +56,6 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_cross_encoder',type=int, default=1)
     parser.add_argument('--checkpoint_docker',type=int, default=1)
 
-
     parser.add_argument('--dim', type=int, default=128)
     parser.add_argument('--edim', type=int, default=64)
 
@@ -79,7 +77,7 @@ if __name__ == '__main__':
 
 
     # ITERATION STEPS
-    parser.add_argument('--unroll_steps', type=int, default=10) # O(1) mem
+    parser.add_argument('--unroll_steps', type=int, default=20) # O(1) mem
     parser.add_argument('--eval_steps', type=int, default=15)
 
 

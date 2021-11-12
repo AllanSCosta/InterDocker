@@ -212,7 +212,6 @@ class Trainer():
                 angles_labels,
                 ignore_index=IGNORE_IDX
             )
-            angles_labels[trajectory_labels == self.config.distance_pred_number_of_bins - 1] = self.config.angle_pred_number_of_bins / 2
             metrics[f'angular xentropy'] = angular_xentropy
 
         # Now we evaluate final layer's predictions
@@ -256,7 +255,6 @@ class Trainer():
             for angle_idx in range(3):
                 angle_ground = angles_labels[:, 0, ..., angle_idx]
                 angle_prediction = logit_expectation(angles_logits[:, 0, ..., angle_idx])
-                angle_prediction[distance_logits.argmax(-1) >= self.config.distance_pred_number_of_bins - 2] = self.config.angle_pred_number_of_bins / 2
                 candidate_images.extend([angle_ground, angle_prediction])
 
         # some nice array slicing to fetch images
