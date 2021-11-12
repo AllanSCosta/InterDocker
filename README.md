@@ -11,7 +11,7 @@ This repository integrates a number of codebases into a protein-protein docking 
 - [SidechainNet](https://github.com/jonathanking/sidechainnet)
 - [Massively Parallel Natural Extension of Reference Frame](https://github.com/EleutherAI/mp_nerf)
 
-IPA and MPNerf are present as standalones packages, as they are modified from original.
+IPA and MPNerf are present as submodules, as they are modified from original.
 
 ## Data Processing
 
@@ -24,10 +24,3 @@ The file data_preprocess.py will set up data for training. The steps are as foll
 - Wrap dataset into single SidechainNet Dataset format
 
 
-## Experiments
-
-### Phase I: Topography
-
--
-
-### Phase II: Arrangement
