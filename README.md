@@ -1,7 +1,9 @@
 
 # End2End Protein Docking
 
-## A pipeline for docking protein structures, dependencies
+<img src="media/proteins-dock.gif" height="250"/>
+
+## A pipeline for docking protein structures
 
 This repository integrates a number of codebases into a protein-protein docking system.
 
