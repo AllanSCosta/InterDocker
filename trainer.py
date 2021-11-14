@@ -16,6 +16,8 @@ from utils import discretize, point_in_circum_to_angle, logit_expectation, get_a
 from mp_nerf.protein_utils import get_protein_metrics
 from copy import deepcopy
 from einops import repeat, rearrange
+from torch_geometric.utils.metric import precision, recall
+
 
 eps = 1e-7
 IGNORE_IDX = -100
@@ -56,11 +58,10 @@ class Trainer():
                 if epoch % self.config.validation_check_rate == 0:
                     for split in VALIDATION_DATASETS:
                         epoch_metrics.update(self.evaluate(split, epoch))
+                    print('saving model')
+                    torch.save(self.model.state_dict(), self.model_path)
 
             if wandb.run: wandb.log(epoch_metrics)
-            print('saving model')
-            torch.save(self.model.state_dict(), self.model_path)
-
 
     def test(self):
         for test_set in TEST_DATASETS:
@@ -136,7 +137,7 @@ class Trainer():
             )
             metrics.update(distogram_metrics)
         else:
-            permutations = torch.zeros_like(batch.seqs.size(0), device=batch.seqs.device)
+            permutations = torch.zeros(batch.seqs.size(0), device=batch.seqs.device)
 
 
         # ===== EVALUATE STRUCTURAL PREDICTIONS ======
@@ -232,18 +233,14 @@ class Trainer():
 
         # evaluate contact prediction metrics
         expectation = logit_expectation(distance_logits)
-        pred_contacts = expectation < self.config.contact_cut
-        ground_contacts = distance_labels < self.config.contact_cut
+        expectation *= (self.config.distance_number_of_bins / self.config.distance_max_radius)
+        pred_contacts = expectation <= self.config.contact_cut
+        distance_ground = rearrange(distance_ground, 'b ... s -> b s ...')[permutation_mask]
+        ground_contacts = distance_ground <= self.config.contact_cut
 
-        true_positives  = (pred_contacts & ground_contacts & edge_mask).sum()
-        false_positives = (pred_contacts & ~ground_contacts & edge_mask).sum()
-        false_negatives = (~pred_contacts & ground_contacts & edge_mask).sum()
-
-        contact_precision = (true_positives / (true_positives + false_positives + eps))
-        contact_recall = (true_positives / (true_positives + false_negatives + eps))
-
-        metrics[f'contact precision'] =  contact_precision
-        metrics[f'contact recall']    =  contact_recall
+        pred_contacts, ground_contacts = pred_contacts[edge_mask], ground_contacts[edge_mask]
+        metrics[f'contact precision'] =  precision(pred_contacts, ground_contacts, num_classes=2).sum()
+        metrics[f'contact recall']    =  recall(pred_contacts, ground_contacts, num_classes=2).sum()
 
         if not fetch_images: return metrics, batch_images, permuted
 

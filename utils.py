@@ -271,7 +271,7 @@ def submit_script(script_path, base_path, params):
         preamble += f'#SBATCH -o {os.path.join(worskpace_dir, name)}.sh.log\n'
         preamble += f'#SBATCH --cpus-per-task=20\n'
         preamble += f'#SBATCH --job-name={name}\n\n'
-        preamble += f'module load anaconda/2021a\n'
+        preamble += f'module load anaconda/2021b\n'
         file.write(preamble)
         params = [(key, value) for key, value in params.items() if (key != 'submit' and key != 'debug' and key != 'sample_dataset')]
         params_strings = [f'--{key} {str(value) if type(value) != list else " ".join([str(v) for v in value])}' for key, value in params]

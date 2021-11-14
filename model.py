@@ -16,10 +16,12 @@ from collections import defaultdict
 
 
 class Interactoformer(nn.Module):
+
     def __init__(
             self,
             config
         ):
+
         super().__init__()
         self.config = config
 
@@ -65,6 +67,7 @@ class Interactoformer(nn.Module):
 
         self.unroll_steps = config.unroll_steps
         self.eval_steps = config.eval_steps
+
 
     def forward(self, batch, is_training):
         output = {}
@@ -386,8 +389,11 @@ class Docker(nn.Module):
             if self.checkpoint:
                 forward = partial(checkpoint.checkpoint, forward)
 
-            nodes, translations, rotations = forward(nodes, edges,
+            nodes, crd_update, rot_update = forward(nodes, edges,
                                                 coors, rotations, mask)
+
+            coors = coors + crd_update
+            rotations = rotations @ rot_update
 
             trajectory_crds.append(coors)
             trajectory_rots.append(rotations)
@@ -434,11 +440,7 @@ class DockerBlock(nn.Module):
         rot_update, crd_update = batch_steps[..., :6], batch_steps[..., 6:]
         rot_update = rotation_6d_to_matrix(rot_update)
         crd_update = einsum('b n c, b n c r -> b n r', crd_update, rotations)
-
-        coors = coors + crd_update
-        rotations = rotations @ rot_update
-
-        return nodes, coors, rotations
+        return nodes, crd_update, rot_update
 
 
 class Attention(nn.Module):
@@ -479,6 +481,7 @@ class Attention(nn.Module):
 
         return self.to_out(out)
 
+
 class Dense2D(nn.Module):
     def __init__(self, layer_structure, kernel_size=9):
         super().__init__()
@@ -492,6 +495,7 @@ class Dense2D(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
 
 class Dense(nn.Module):
     def __init__(self, layer_structure, checkpoint=False):
