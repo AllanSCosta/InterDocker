@@ -1,5 +1,5 @@
 
-# InterDocker: A pipeline for structure and sequence-based protein docking
+# InterDocker: A Pipeline for Structure and Sequence-based Protein Docking
 
 <img src="media/proteins-dock.gif" height="250"/>
 
