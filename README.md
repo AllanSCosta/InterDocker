@@ -1,9 +1,9 @@
 
-# End2End Protein Docking
+# InterDocker: A pipeline for structure and sequence-based protein docking
 
 <img src="media/proteins-dock.gif" height="250"/>
 
-## A pipeline for docking protein structures
+### Dependencies
 
 This repository integrates a number of codebases into a protein-protein docking system.
 
