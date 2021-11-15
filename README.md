@@ -2,8 +2,9 @@
 # InterDocker: Iterative Structure-Based Protein Docking
 
 
+<p align="center">
 <img src="media/proteins-dock.gif" height="250"/>
-
+</p>
 
 # Architecture
 
