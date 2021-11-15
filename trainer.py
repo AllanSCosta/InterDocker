@@ -50,7 +50,7 @@ class Trainer():
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
         self.accumulation = config.accumulate_every
 
-    def train(self):
+    def train(self, optuna_trial=None):
         for epoch in range(self.config.max_epochs):
             epoch_metrics = self.evaluate(TRAIN_DATASETS[0], epoch)
 
@@ -58,6 +58,8 @@ class Trainer():
                 if epoch % self.config.validation_check_rate == 0:
                     for split in VALIDATION_DATASETS:
                         epoch_metrics.update(self.evaluate(split, epoch))
+                    if optuna_trial is not None:
+                        optuna_trial.report(metrics["loss"], epoch)
                     print('saving model')
                     torch.save(self.model.state_dict(), self.model_path)
 
