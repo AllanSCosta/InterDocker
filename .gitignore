@@ -13,3 +13,5 @@ lightning_logs/
 .ftpconfig
 .DS_Store
 img/
+inference/
+language_model_benchmark.py
