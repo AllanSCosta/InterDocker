@@ -57,7 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', type=str, default='/home/gridsan/allanc/interaformer/wandb/offline-run-20211115_150131-3o7s12ca/files/')
 
     parser.add_argument('--cross_encoder_steps', type=int, default=20)
-    parser.add_argument('--docker_steps', type=int, default=10)
+    parser.add_argument('--docker_steps', type=int, default=30)
     parser.add_argument('--out_path', type=str, default='./inference/')
 
     args = parser.parse_args()
