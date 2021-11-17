@@ -1,7 +1,16 @@
 
-# End2End Protein Docking
+# InterDocker: Iterative Structure-Based Protein Docking
 
-## A pipeline for docking protein structures, dependencies
+
+<p align="center">
+<img src="media/proteins-dock.gif" height="250"/>
+</p>
+
+# Architecture
+
+<img src="media/interdocker-high-level.jpg" height="350"/>
+
+### Dependencies
 
 This repository integrates a number of codebases into a protein-protein docking system.
 
@@ -12,6 +21,8 @@ This repository integrates a number of codebases into a protein-protein docking 
 - [Massively Parallel Natural Extension of Reference Frame](https://github.com/EleutherAI/mp_nerf)
 
 IPA and MPNerf are present as submodules, as they are modified from original.
+
+
 
 ## Data Processing
 
