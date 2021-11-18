@@ -33,5 +33,3 @@ The file data_preprocess.py will set up data for training. The steps are as foll
 - Parse PDBs into SidechainNet format, unify data into single files
 - Extract and encode sequences from PDB through ESM
 - Wrap dataset into single SidechainNet Dataset format
-
-

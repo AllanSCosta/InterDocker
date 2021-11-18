@@ -71,8 +71,10 @@ class Trainer():
                     torch.save(self.model.state_dict(), self.model_path)
 
             if wandb.run: wandb.log(epoch_metrics)
+
         print(f'model path: {self.model_path}')
         print(f'config path: {self.config_path}')
+        torch.save(self.model.state_dict(), self.model_path)
 
     def test(self):
         for test_set in TEST_DATASETS:

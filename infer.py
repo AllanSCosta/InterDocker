@@ -52,13 +52,19 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--p1', type=str, default='/home/gridsan/allanc/data/dips_preprocessed/train/1m/1mcz.pdb4.gz_1_O_1mcz.pdb4.gz_1_P/chain_1.pdb')
-    parser.add_argument('--p2', type=str, default='/home/gridsan/allanc/data/dips_preprocessed/train/1m/1mcz.pdb4.gz_1_O_1mcz.pdb4.gz_1_P/chain_2.pdb')
-    parser.add_argument('--model_path', type=str, default='/home/gridsan/allanc/interaformer/wandb/offline-run-20211115_150131-3o7s12ca/files/')
+    parser.add_argument('--p1', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_A.pdb')
+    parser.add_argument('--p2', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_B.pdb')
+    parser.add_argument('--model_path', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/models/bipartite-portico')
+
+    parser.add_argument('--out_path', type=str, default='./inference/')
 
     parser.add_argument('--cross_encoder_steps', type=int, default=20)
     parser.add_argument('--docker_steps', type=int, default=30)
-    parser.add_argument('--out_path', type=str, default='./inference/')
+
+    parser.add_argument('--logits', type=int, default=0)
+    parser.add_argument('--timeseries', type=int, default=1)
+    parser.add_argument('--pdb', type=int, default=0)
+    parser.add_argument('--image', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -119,45 +125,54 @@ if __name__ == '__main__':
     out_folder = os.path.join(args.out_path, folder_name)
     os.makedirs(out_folder, exist_ok=True)
 
-    print('Plotting Timeseries')
-    timeseries = rearrange(output['translations'], 'b i t c -> t b i c')
-    view = plot_timeseries(datum.str_seqs, datum.angs.cpu(), timeseries.cpu(), (datum.chns == datum.chns[0]).sum().item())
+    if args.timeseries:
+        print('Plotting Timeseries')
+        timeseries = rearrange(output['translations'], 'b i t c -> t b i c')
+        view = plot_timeseries(datum.str_seqs, datum.angs.cpu(), timeseries.cpu(), (datum.chns == datum.chns[0]).sum().item())
 
-    timeseries_path = os.path.join(out_folder, 'timeseries.html')
-    with open(timeseries_path, 'w') as file:
-        file.write(view._make_html())
+        timeseries_path = os.path.join(out_folder, 'timeseries.html')
+        with open(timeseries_path, 'w') as file:
+            file.write(view._make_html())
 
-    final_coords = timeseries[-1].cpu()
-    backbone = ca_bb_fold(final_coords)[0]
-    scaffolds = build_scaffolds_from_scn_angles(datum.str_seqs, angles=datum.angs.cpu(), device="cpu")
-    coords, _ = sidechain_fold(wrapper = backbone.clone(), **scaffolds, c_beta = 'torsion')
-    full_atom = StructureBuilder(datum.str_seqs, coords.reshape(-1, 3))
+    if args.pdb:
+        final_coords = timeseries[-1].cpu()
+        backbone = ca_bb_fold(final_coords)[0]
+        scaffolds = build_scaffolds_from_scn_angles(datum.str_seqs, angles=datum.angs.cpu(), device="cpu")
+        coords, _ = sidechain_fold(wrapper = backbone.clone(), **scaffolds, c_beta = 'torsion')
+        full_atom = StructureBuilder(datum.str_seqs, coords.reshape(-1, 3))
 
-    pdb_path = os.path.join(out_folder, 'docked.pdb')
-    with open(pdb_path, 'w') as file:
-        file.write(full_atom.to_pdbstr())
+        pdb_path = os.path.join(out_folder, 'docked.pdb')
+        with open(pdb_path, 'w') as file:
+            file.write(full_atom.to_pdbstr())
 
     logits = output['logit_traj']
-    logit_path = os.path.join(out_folder, 'logits.pyd')
-    with open(logit_path, 'wb') as file:
-        pickle.dump(logits, file)
+    log_output = dict()
 
     distance_logits = rearrange(logits['distance'], 'b l ... -> l b ...')[-1]
+    log_output['dist'] = distance_logits
+
     distance_expectation = logit_expectation(distance_logits)
     images = [ distance_expectation ]
 
     if 'angles' in logits:
         angle_logits = rearrange(logits['angles'], 'b l ... (a e) -> l a b ... e', a=3)[-1]
+        log_output['ang'] = angle_logits
         for angle_idx in range(3):
             angle_expectation = logit_expectation(angle_logits[angle_idx])
             images.append(angle_expectation)
 
-    external_edges = (rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()'))
-    images = [img[external_edges] for img in images]
-    images = [img[:int(len(img)/2)] for img in images]
-    images = [rearrange(img, '(n m) -> n m', n=len(seq1), m=len(seq2)).cpu() for img in images]
-    images = [img.detach().cpu() for img in images]
-    fig = plot_predictions(images)
+    if args.logits:
+        logit_path = os.path.join(out_folder, 'logits.pyd')
+        with open(logit_path, 'wb') as file:
+            pickle.dump(log_output, file)
 
-    img_path = os.path.join(out_folder, 'distograms.png')
-    fig.savefig(img_path)
+    if args.image:
+        external_edges = (rearrange(batch.chns, 'b s -> b () s') != rearrange(batch.chns, 'b s -> b s ()'))
+        images = [img[external_edges] for img in images]
+        images = [img[:int(len(img)/2)] for img in images]
+        images = [rearrange(img, '(n m) -> n m', n=len(seq1), m=len(seq2)).cpu() for img in images]
+        images = [img.detach().cpu() for img in images]
+        fig = plot_predictions(images)
+
+        img_path = os.path.join(out_folder, 'distograms.png')
+        fig.savefig(img_path)
