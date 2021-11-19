@@ -16,6 +16,8 @@ from utils import submit_script
 import optuna
 import argparse
 
+from math import floor, ceil
+
 from run import config_parser
 
 with torch.no_grad():
@@ -23,7 +25,7 @@ with torch.no_grad():
 
 
 def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/allan"):
-    config = config_parser()
+    config, _ = config_parser().parse_known_args()
     
 #     # ========================
 #     # GENERAL
@@ -44,11 +46,19 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # ========================
 #     # ARCHITECTURE
 #     # ========================
-    config.encoder_depth = trial.suggest_int("encoder_depth", 3, 6)
-    config.cross_encoder_depth = min(12 - config.encoder_depth, trial.suggest_int("encoder_depth", 3, 9))
-    config.docker_depth = max(12 - config.encoder_depth - config.cross_encoder_depth, 0)
 
-    config.heads = trial.suggest_categorical("heads", [4, 8]) - config.encoder_depth
+    config.docker_depth = trial.suggest_int("docker_depth", 2, 5)
+
+    cross_encoder_fraction = trial.suggest_float("cross_encoder_fraction", 0.09, 0.9)
+    total_depth = 12
+
+    config.cross_encoder_depth = ceil((total_depth - config.docker_depth) * cross_encoder_fraction)
+    config.encoder_depth = total_depth - config.cross_encoder_depth - config.docker_depth
+
+    trial.set_user_attr(f"cross_encoder_depth", config.cross_encoder_depth)
+    trial.set_user_attr(f"encoder_depth", config.encoder_depth)
+    
+    config.heads = trial.suggest_categorical("heads", [4, 8])
 
 #     # ITERATION STEPS
     config.unroll_steps = trial.suggest_int("unroll_steps", 15, 20)
@@ -64,7 +74,8 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # OPTIM
     config.lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
     config.accumulate_every = 1
-    config.batch_size = trial.suggest_categorical("batch_size", [16, 32, 48]) - config.encoder_depth
+    config.batch_size = trial.suggest_categorical("batch_size", [16, 32, 48]) 
+    config.max_epochs = 50
 
 #     # ========================
 #     # TEST
@@ -76,8 +87,8 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 
     return config 
 
-def objective_function(trial):
-    config = get_config(trial)
+def objective_function(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/allan"):
+    config = get_config(trial, dataset_source=dataset_source)
     wandb.init(
         reinit=True,
         name=config.name,
@@ -103,12 +114,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Dock some proteins')
     parser.add_argument("--dataset_source", default="/home/gridsan/kalyanpa/DNAInteract_shared/allan")
+    parser.add_argument("--trials", default=50, type=int)
 
     args = parser.parse_args()
 
     study = optuna.create_study(direction="maximize")
     objective = lambda trial: objective_function(trial, dataset_source=args.dataset_source)
-    study.optimize(objective, n_trials=20)
+    study.optimize(objective, n_trials=args.trials)
 
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
