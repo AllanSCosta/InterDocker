@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 
 import plotly.graph_objects as go
 from torch.linalg import norm
+from tqdm import tqdm
 
 
 plt.rcParams.update({
@@ -69,6 +70,28 @@ def plot_aligned_structures(seq, gnd_crd, pred_crd, angs, boundary):
     view.rotate(1, 'y')
 
     return view
+
+
+def plot_timeseries(seq, ang, timeseries, boundary):
+    models = ""
+    view = py3Dmol.view(width=800, height=600)
+    view.setBackgroundColor(0x000000,0)
+
+    for i, crd in enumerate(tqdm(timeseries)):
+        bb = ca_bb_fold(crd)[0]
+        scaffolds = build_scaffolds_from_scn_angles(seq, angles=ang, device="cpu")
+        coords, _ = sidechain_fold(wrapper = bb.clone(), **scaffolds, c_beta = 'torsion')
+        structures = scn.StructureBuilder(seq, coords.reshape(-1, 3))
+        models += "MODEL " + str(i) + "\n" + structures.to_pdbstr() + "ENDMDL\n"
+
+    view.addModelsAsFrames(models)
+    view.setStyle({'model': -1, 'resi': [f'1-{boundary}']}, {'cartoon': {'color': pred_colors[0]}})
+    view.setStyle({'model': -1, 'resi': [f'{boundary + 1}-{len(coords)}']}, {'cartoon': {'color': pred_colors[1]}})
+
+    view.zoomTo()
+    view.animate({'loop': "forward"})
+    return view
+
 
 def plot_aligned_timeseries(seq, timeseries, boundary):
     models = ""

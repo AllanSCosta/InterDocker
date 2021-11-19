@@ -1,9 +1,16 @@
 
-# End2End Protein Docking
+# InterDocker: Iterative Structure-Based Protein Docking
 
+
+<p align="center">
 <img src="media/proteins-dock.gif" height="250"/>
+</p>
 
-## A pipeline for docking protein structures
+# Architecture
+
+<img src="media/interdocker-high-level.jpg" height="350"/>
+
+### Dependencies
 
 This repository integrates a number of codebases into a protein-protein docking system.
 
@@ -15,6 +22,8 @@ This repository integrates a number of codebases into a protein-protein docking 
 
 IPA and MPNerf are present as submodules, as they are modified from original.
 
+
+
 ## Data Processing
 
 The file data_preprocess.py will set up data for training. The steps are as follows
@@ -24,5 +33,3 @@ The file data_preprocess.py will set up data for training. The steps are as foll
 - Parse PDBs into SidechainNet format, unify data into single files
 - Extract and encode sequences from PDB through ESM
 - Wrap dataset into single SidechainNet Dataset format
-
-

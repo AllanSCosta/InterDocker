@@ -8,6 +8,7 @@ from torch.nn.functional import cross_entropy
 import numpy as np
 import torch
 import wandb
+import pickle
 from tqdm import tqdm
 from visualization import plot_aligned_timeseries, plot_aligned_structures, plot_predictions
 
@@ -26,16 +27,24 @@ class Trainer():
 
     def __init__(self, config, model, loaders):
         super().__init__()
-        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        self.device = ('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         self.config = config
+
         self.model = model
         self.model.to(self.device)
+        wandb.watch(self.model)
+
         self.loaders = loaders
 
         self.model_path = os.path.join(wandb.run.dir, 'checkpoint.pt')
+        self.config_path = os.path.join(wandb.run.dir, 'config.pkl')
+        with open(self.config_path, 'wb') as file:
+            pickle.dump(config, file)
+
+        torch.save(self.model.state_dict(), self.model_path)
         print(f'model path: {self.model_path}')
-        wandb.watch(self.model)
+        print(f'config path: {self.config_path}')
 
         self.best_val_loss   = float('inf')
 
@@ -64,6 +73,10 @@ class Trainer():
                     torch.save(self.model.state_dict(), self.model_path)
 
             if wandb.run: wandb.log(epoch_metrics)
+
+        print(f'model path: {self.model_path}')
+        print(f'config path: {self.config_path}')
+        torch.save(self.model.state_dict(), self.model_path)
 
     def test(self):
         for test_set in TEST_DATASETS:
@@ -240,9 +253,8 @@ class Trainer():
         distance_ground = rearrange(distance_ground, 'b ... s -> b s ...')[permutation_mask]
         ground_contacts = distance_ground <= self.config.contact_cut
 
-        pred_contacts, ground_contacts = pred_contacts[edge_mask], ground_contacts[edge_mask]
-        metrics[f'contact precision'] =  precision(pred_contacts, ground_contacts, num_classes=2).sum()
-        metrics[f'contact recall']    =  recall(pred_contacts, ground_contacts, num_classes=2).sum()
+        metrics[f'contact precision'] =  precision(pred_contacts[edge_mask], ground_contacts[edge_mask], num_classes=2).sum()
+        metrics[f'contact recall']    =  recall(pred_contacts[edge_mask], ground_contacts[edge_mask], num_classes=2).sum()
 
         if not fetch_images: return metrics, batch_images, permuted
 

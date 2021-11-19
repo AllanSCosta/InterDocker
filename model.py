@@ -23,6 +23,8 @@ class Interactoformer(nn.Module):
         ):
 
         super().__init__()
+        config.checkpoint_denses = 0
+
         self.config = config
 
         self.node_crds_emb = nn.Linear(3, config.dim)
@@ -36,9 +38,9 @@ class Interactoformer(nn.Module):
         self.circum_emb = nn.Linear(2, 12)
         self.chain_emb = nn.Embedding(3, config.dim, padding_idx=0)
 
-        self.backbone_dihedrals_emb = Dense([6 * 12, 6 * 12, 64])
-        self.sidechain_dihedrals_emb = Dense([6 * 12, 6 * 12, 64])
-        self.dihedral_emb = Dense([128, 128, config.dim])
+        self.backbone_dihedrals_emb = Dense([6 * 12, 6 * 12, 64], checkpoint=config.checkpoint_denses)
+        self.sidechain_dihedrals_emb = Dense([6 * 12, 6 * 12, 64], checkpoint=config.checkpoint_denses)
+        self.dihedral_emb = Dense([128, 128, config.dim], checkpoint=config.checkpoint_denses)
 
         self.encoder = Encoder(config)
         self.cross_encoder = CrossEncoder(config)
@@ -54,15 +56,15 @@ class Interactoformer(nn.Module):
                     end=1, number=config.angle_number_of_bins, basis='gaussian', cutoff=True)
 
         edge_enc_size = config.distance_number_of_bins + 3 * config.angle_number_of_bins
-        self.to_internal_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
+        self.to_internal_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim], checkpoint=config.checkpoint_denses)
 
         self.structure_only = config.structure_only
         if self.structure_only:
-            self.to_external_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim])
+            self.to_external_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim], checkpoint=config.checkpoint_denses)
         else:
-            self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim])
+            self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim], checkpoint=config.checkpoint_denses)
 
-        self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins])
+        self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins], checkpoint=config.checkpoint_denses)
         self.to_position = Dense([config.dim, config.dim, 3])
 
         self.unroll_steps = config.unroll_steps
@@ -86,7 +88,6 @@ class Interactoformer(nn.Module):
 
         bb_dihedrals = rearrange(angles[..., :6, :], 'b s a h -> b s (a h)')
         bb_dihedrals = self.backbone_dihedrals_emb(bb_dihedrals)
-
         sc_dihedrals = rearrange(angles[..., 6:, :], 'b s a h -> b s (a h)')
         sc_dihedrals = self.sidechain_dihedrals_emb(sc_dihedrals)
 
@@ -95,12 +96,10 @@ class Interactoformer(nn.Module):
         # ====== BREAK HOMOMERIC SYMMETRY ======
         chains = self.chain_emb(batch.chns.type(torch.long))
 
-
         # BASE NODE REPRESENTATION
         # =========================
         nodes = sequence + dihedrals + chains
         # =========================
-
 
         # ====== DEFINE EDGES  ======
         edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=device)
@@ -108,15 +107,19 @@ class Interactoformer(nn.Module):
         internal_edge_mask =  internal_edge_mask & edge_pad_mask
         external_edge_mask = ~internal_edge_mask & edge_pad_mask
 
-
         # ====== PRODUCE STRUCTURAL SIGNALS  ======
         max_radius = self.config.distance_max_radius
-        edge_distance = batch.edge_distance[..., 0]
+        edge_distance = batch.edge_distance
+        edge_angles = batch.edge_angles
+
+        if len(edge_distance.size()) == 4:
+            edge_distance = edge_distance[..., 0]
+            edge_angles = edge_angles[..., 0, :]
+
         dist_signal = self.edge_norm_enc(edge_distance)
-        angle_signal = self.edge_angle_enc(batch.edge_angles[..., 0, :])
+        angle_signal = self.edge_angle_enc(edge_angles)
         angle_signal = rearrange(angle_signal, 'b s z a c -> b s z (a c)')
         angle_signal[edge_distance < max_radius] = 0
-
 
         # ====== BASE INTERNAL EDGES REPRESENTATION  ======
         edge_structural_signal = torch.cat((dist_signal, angle_signal), dim=-1)
@@ -515,5 +518,5 @@ class Dense(nn.Module):
 
     def forward(self, x):
         forward = self.forward_constructor(self.layers)
-        if self.checkpoint: forward = partial(checkpoint.checkpoint, function=forward)
+        if self.checkpoint: forward = partial(checkpoint.checkpoint, forward)
         return forward(x)
