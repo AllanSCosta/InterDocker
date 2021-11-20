@@ -108,7 +108,7 @@ def objective_function(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract
     trainer.test()
 
     print('Done.')
-    return metrics['loss']
+    return metrics['val loss']
 
 if __name__ == "__main__":
 

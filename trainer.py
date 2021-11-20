@@ -68,7 +68,7 @@ class Trainer():
                     for split in VALIDATION_DATASETS:
                         epoch_metrics.update(self.evaluate(split, epoch))
                     if optuna_trial is not None:
-                        optuna_trial.report(metrics["loss"], epoch)
+                        optuna_trial.report(epoch_metrics["val loss"], epoch)
                     print('saving model')
                     torch.save(self.model.state_dict(), self.model_path)
 
