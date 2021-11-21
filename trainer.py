@@ -18,6 +18,7 @@ from mp_nerf.protein_utils import get_protein_metrics
 from copy import deepcopy
 from einops import repeat, rearrange
 from torch_geometric.utils.metric import precision, recall
+from optuna.exceptions import TrialPruned
 
 
 eps = 1e-7
@@ -69,6 +70,8 @@ class Trainer():
                         epoch_metrics.update(self.evaluate(split, epoch))
                     if optuna_trial is not None:
                         optuna_trial.report(epoch_metrics["val loss"], epoch)
+                        if optuna_trial.should_prune():
+                            raise TrialPruned()
                     print('saving model')
                     torch.save(self.model.state_dict(), self.model_path)
 

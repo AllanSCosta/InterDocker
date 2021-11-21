@@ -11,7 +11,7 @@ from data import create_dataloaders
 from trainer import Trainer
 from model import Interactoformer
 
-from utils import submit_script
+from utils import random_name
 
 import optuna
 import argparse
@@ -32,7 +32,6 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # ========================
     config.debug = False
     config.submit = False
-    config.name = "optuna"
     config.note = "nonote"
     config.report_frequency = 20
     config.seed = 42
@@ -42,23 +41,35 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # DATA
 #     # ========================
     config.dataset_source = dataset_source
+    config.spatial_clamp = 96
 
 #     # ========================
 #     # ARCHITECTURE
 #     # ========================
+    config.dim = trial.suggest_categorical("dim", [64, 128])
+    config.edim = trial.suggest_categorical("edim", [32, 64])
 
     config.docker_depth = trial.suggest_int("docker_depth", 2, 5)
 
     cross_encoder_fraction = trial.suggest_float("cross_encoder_fraction", 0.09, 0.9)
-    total_depth = 12
+
+    total_depth = 11
 
     config.cross_encoder_depth = ceil((total_depth - config.docker_depth) * cross_encoder_fraction)
     config.encoder_depth = total_depth - config.cross_encoder_depth - config.docker_depth
+
+    config.kernel_size = trial.suggest_int("kernel_size", 3, 8)
+    config.num_conv_per_layer = trial.suggest_int("num_conv_per_layer", 1, 2)
 
     trial.set_user_attr(f"cross_encoder_depth", config.cross_encoder_depth)
     trial.set_user_attr(f"encoder_depth", config.encoder_depth)
     
     config.heads = trial.suggest_categorical("heads", [4, 8])
+    config.scalar_key_dim = trial.suggest_categorical("scalar_key_dim", [16, 32])
+    config.scalar_value_dim = trial.suggest_categorical("scalar_value_dim", [16, 32])
+
+    config.point_key_dim = trial.suggest_categorical("point_key_dim", [16, 32])
+    config.point_value_dim = trial.suggest_categorical("point_value_dim", [16, 32])
 
 #     # ITERATION STEPS
     config.unroll_steps = trial.suggest_int("unroll_steps", 15, 20)
@@ -74,7 +85,7 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # OPTIM
     config.lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
     config.accumulate_every = 1
-    config.batch_size = trial.suggest_categorical("batch_size", [16, 32, 48]) 
+    config.batch_size = trial.suggest_categorical("batch_size", [48, 64]) 
     config.max_epochs = 50
 
 #     # ========================
@@ -89,9 +100,10 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 
 def objective_function(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/allan"):
     config = get_config(trial, dataset_source=dataset_source)
+    print(config)
     wandb.init(
         reinit=True,
-        name=config.name,
+        name=random_name(),
         config=config,
         project='Interactoformer',
     )
