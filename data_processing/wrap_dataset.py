@@ -40,9 +40,8 @@ if __name__ == '__main__':
     dataset = dict()
 
     pool = multiprocessing.Pool(processes=40)
-    downsample = 0.1
 
-    for split in ('train', 'test'):
+    for split in ('DB5', 'train', 'val'):
         split_path = os.path.join(base_path, split)
 
         paths, counter = [], 0
@@ -54,8 +53,9 @@ if __name__ == '__main__':
 
         print(f'fetched {len(paths)} paths for {split}')
         random.shuffle(paths)
-        # paths = paths[:int(0.08 * len(paths))]
-        # print(f'reduced to {len(paths)} paths for {split}')
+
+        paths = paths[:int(0.1 * len(paths))]
+        print(f'reduced to {len(paths)} paths for {split}')
 
         complexes = pool.map(load_complex, paths)
         print(f'fetched {len(complexes)} complexes for {split}')
@@ -63,12 +63,13 @@ if __name__ == '__main__':
         split_dataset = defaultdict(list)
         for complex in tqdm(complexes):
             if not complex: continue
-            for key in ('ids', 'crd', 'ang', 'seq', 'chn', 'enc'):
+            for key in ('ids', 'crd', 'ang', 'seq', 'chn', 'enc', 'tgt_crd'):
+                if key not in complex: continue
                 split_dataset[key].append(complex[key])
 
         dataset[split] = split_dataset
 
-    with open('dips_1024_pruned_esm_128.pkl', 'wb') as file:
+    with open('../../data/dips_1024_pruned_esm_128_sample.pkl', 'wb') as file:
         pickle.dump(dataset, file)
 
     print('done')

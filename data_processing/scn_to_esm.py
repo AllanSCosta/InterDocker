@@ -36,14 +36,17 @@ def augment_dataset(path, funnel, transformer, batch_converter, dtype=torch.floa
 
     destination = os.path.join(path, f'scn_complex_esm_{funnel.weight.shape[0]}.pkl')
 
-    if os.path.exists(destination):
-        print(f'{destination} already computed')
-        return
+    # if os.path.exists(destination):
+        # print(f'{destination} already computed')
+        # return
 
     with open(source, 'rb') as file:
         complex = pickle.load(file)
 
-    cut = len(complex['chn']) - complex['chn'].sum()
+    assert len(complex['chn'].shape) != 2
+    cut = int(len(complex['chn']) - complex['chn'].sum())
+
+    print(cut, len(complex['chn']))
     residues1, residues2 = complex['seq'][:cut], complex['seq'][cut:]
 
     if len(residues1) >= 1022 or len(residues2) >= 1022: return
@@ -111,8 +114,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='script to embed sequences')
 
     parser.add_argument('--source', type=str, default='../../data/dips_preprocessed/')
-    parser.add_argument('--split', type=str, default='train')
-    parser.add_argument('--max_workers', type=int, default=40)
+    parser.add_argument('--split', type=str, default='DB5')
     parser.add_argument('--pca', type=int, default=128)
 
     parser.add_argument('--world_size', type=int, default=1)

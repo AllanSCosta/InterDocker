@@ -16,7 +16,6 @@ from collections import defaultdict
 
 
 class Interactoformer(nn.Module):
-
     def __init__(
             self,
             config

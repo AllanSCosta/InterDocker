@@ -64,30 +64,30 @@ def get_subunits(ensemble):
     return names, (bdf0, bdf1, udf0, udf1)
 
 
-def process_backbone(df, chain):
+def clean_backbone(df):
     df = df.reset_index(drop=True)
+    chain = np.unique(df['chain'])[0]
     backbone = df[(df['name'] == 'CA') & (df['chain'] == chain)]
-
-    encoding = ''.join([triple_to_single[triple] for triple in np.array(backbone['resname'])])
-    node_pos = torch.FloatTensor(backbone[['x', 'y', 'z']].to_numpy())
-
-    return node_pos, encoding
-
+    return df, backbone['resname']
+    
 
 def lmdb_to_pdb(datum, destination, max_complex_size, min_complex_size, split):
     target_df = datum['atoms_pairs']
-    sub_names, (bound1, bound2, _, _) = get_subunits(target_df)
+    sub_names, (bound1, bound2, unbound1, unbound2) = get_subunits(target_df)
 
-    node_pos1, residues1 = process_backbone(bound1, np.unique(bound1['chain'])[0])
-    node_pos2, residues2 = process_backbone(bound2, np.unique(bound2['chain'])[0])
+    bound1, bound_chain1 = clean_backbone(bound1)
+    bound2, bound_chain2 = clean_backbone(bound2)
 
-    if not (max_complex_size > len(residues1) + len(residues2) > min_complex_size):
+    if (unbound1 is not None) and (unbound2 is not None):
+        unbound1, unbound_chain1 = clean_backbone(unbound1)
+        unbound2, unbound_chain2 = clean_backbone(unbound2)
+
+    if not (max_complex_size > len(bound_chain1) + len(bound_chain2) > min_complex_size):
         return False
 
-    bound1, bound2 = bound1.reset_index(drop=True), bound2.reset_index(drop=True)
     ensemble = bound1.ensemble[0]
 
-    for bound, filename in zip([bound1, bound2], ['chain_1.pdb', 'chain_2.pdb']):
+    for bound, filename in zip([bound1, bound2, unbound1, unbound2], ['chain_1.pdb', 'chain_2.pdb', 'chain_1_unbound.pdb', 'chain_2_unbound.pdb']):
         base_path = os.path.join(destination, split, ensemble[:2], ensemble)
         full_path = os.path.join(base_path, filename)
 
@@ -109,15 +109,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='script to embed sequences')
 
     parser.add_argument('--destination', type=str, default='../../data/dips_preprocessed/')
-    parser.add_argument('--split', type=str, default='train')
-    parser.add_argument('--max_workers', type=int, default=40)
+    parser.add_argument('--split', type=str, default='DB5')
+    parser.add_argument('--max_workers', type=int, default=0)
 
     parser.add_argument('--max_complex_size', type=int, default=5000)
     parser.add_argument('--min_complex_size', type=int, default=10)
 
     args = parser.parse_args()
 
-    dataset = da.load_dataset(f'../../language_models_benchmarks/data/DIPS-split/data/{args.split}', 'lmdb')
+    dataset = da.load_dataset(f'../../data/dips_raw/raw/DB5/data', 'lmdb')
 
     deconstructor = partial(
         lmdb_to_pdb,

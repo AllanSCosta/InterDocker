@@ -94,6 +94,7 @@ def plot_timeseries(seq, ang, timeseries, boundary):
 
 
 def plot_aligned_timeseries(seq, timeseries, boundary):
+    seq = ''.join([(char if char != '-' else 'G') for char in seq])
     models = ""
     view = py3Dmol.view(width=800, height=600)
     view.setBackgroundColor(0x000000,0)
@@ -112,8 +113,8 @@ def plot_aligned_timeseries(seq, timeseries, boundary):
     view.addModelsAsFrames(models)
     view.setStyle({'model': -1, 'resi': [f'1-{boundary}']}, {'cartoon': {'color': gnd_colors[0], 'opacity': 0.8} })
     view.setStyle({'model': -1, 'resi': [f'{boundary + 1}-{len(gnd_crd)}']}, {'cartoon': {'color': gnd_colors[1], 'opacity': 0.8}})
-    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + 1}-{len(gnd_crd) + boundary}']}, {'cartoon': {'color': pred_colors[0]}, 'stick': {'radius': .15, 'color': pred_colors[0]}})
-    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + boundary + 1}-{2 * len(gnd_crd)}']}, {'cartoon': {'color': pred_colors[1]}, 'stick': {'radius': .15, 'color': pred_colors[1]}})
+    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + 1}-{len(gnd_crd) + boundary}']}, {'cartoon': {'color': pred_colors[0]}})
+    view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + boundary + 1}-{2 * len(gnd_crd)}']}, {'cartoon': {'color': pred_colors[1]}})
 
     view.zoomTo()
     view.animate({'loop': "forward"})
