@@ -51,12 +51,17 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 
     config.docker_depth = trial.suggest_int("docker_depth", 2, 5)
 
-    cross_encoder_fraction = trial.suggest_float("cross_encoder_fraction", 0.09, 0.9)
-
     total_depth = 11
+    remaining_depth = 11 - config.docker_depth
 
-    config.cross_encoder_depth = ceil((total_depth - config.docker_depth) * cross_encoder_fraction)
-    config.encoder_depth = total_depth - config.cross_encoder_depth - config.docker_depth
+    cross_encoder_fraction = trial.suggest_float("cross_encoder_fraction", 0.01, 0.7)
+
+    config.cross_encoder_depth = ceil(remaining_depth * cross_encoder_fraction)
+    config.encoder_depth = remaining_depth - config.cross_encoder_depth
+
+    if config.encoder_depth == 0:
+        config.encoder_depth += 1
+        config.cross_encoder_depth -= 1
 
     config.kernel_size = trial.suggest_int("kernel_size", 3, 8)
     config.num_conv_per_layer = trial.suggest_int("num_conv_per_layer", 1, 2)
@@ -68,8 +73,8 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
     config.scalar_key_dim = trial.suggest_categorical("scalar_key_dim", [16, 32])
     config.scalar_value_dim = trial.suggest_categorical("scalar_value_dim", [16, 32])
 
-    config.point_key_dim = trial.suggest_categorical("point_key_dim", [16, 32])
-    config.point_value_dim = trial.suggest_categorical("point_value_dim", [16, 32])
+    # config.point_key_dim = trial.suggest_categorical("point_key_dim", [16, 32])
+    # config.point_value_dim = trial.suggest_categorical("point_value_dim", [16, 32])
 
 #     # ITERATION STEPS
     config.unroll_steps = trial.suggest_int("unroll_steps", 15, 20)
@@ -85,7 +90,7 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
 #     # OPTIM
     config.lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
     config.accumulate_every = 1
-    config.batch_size = trial.suggest_categorical("batch_size", [48, 64]) 
+    config.batch_size = trial.suggest_categorical("batch_size", [48]) 
     config.max_epochs = 50
 
 #     # ========================
