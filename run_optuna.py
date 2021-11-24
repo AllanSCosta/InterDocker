@@ -52,7 +52,7 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
     config.docker_depth = trial.suggest_int("docker_depth", 2, 5)
 
     total_depth = 11
-    remaining_depth = 11 - config.docker_depth
+    remaining_depth = total_depth - config.docker_depth
 
     cross_encoder_fraction = trial.suggest_float("cross_encoder_fraction", 0.01, 0.7)
 
@@ -91,7 +91,7 @@ def get_config(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract_shared/
     config.lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
     config.accumulate_every = 1
     config.batch_size = trial.suggest_categorical("batch_size", [48]) 
-    config.max_epochs = 50
+    config.max_epochs = 40
 
 #     # ========================
 #     # TEST
@@ -119,7 +119,7 @@ def objective_function(trial, dataset_source="/home/gridsan/kalyanpa/DNAInteract
     trainer = Trainer(config, model, loaders)
     print('Starting Train')
     trainer.train(optuna_trial=trial)
-    metrics = evaluate(VALIDATION_DATASETS[0])
+    metrics = trainer.evaluate(VALIDATION_DATASETS[0])
 
     print('Starting Test')
     trainer.test()
