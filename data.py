@@ -11,6 +11,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import subgraph, to_dense_batch, to_dense_adj
 
 from scipy.spatial import KDTree
+from einops import repeat
 
 from einops import rearrange
 import time
@@ -140,8 +141,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             return self[new_idx]
 
         datum = self.homomeric_augmentation(datum)
+        chains = self.split_chains(datum)
 
-        return datum
+        return chains
 
     @classmethod
     def build_datum(cls, ids, str_seqs, crds, angs, chns, encs=None, tgt_crds=None):
@@ -200,6 +202,37 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         )
 
         return datum
+
+    def split_chains(self, datum):
+        chains = []
+        for chain in (1, 2):
+            nodes_filter = datum.chns == chain
+
+            chain_subgraph = Data()
+            chain_subgraph.crds = datum.crds[nodes_filter]
+            chain_subgraph.tgt_crds = datum.tgt_crds[nodes_filter]
+            chain_subgraph.tgt_rots = datum.tgt_rots[nodes_filter]
+            chain_subgraph.bck_crds=datum.bck_crds[nodes_filter]
+            chain_subgraph.rots=datum.rots[nodes_filter]
+            chain_subgraph.chns=datum.chns[nodes_filter]
+            chain_subgraph.seqs=datum.seqs[nodes_filter]
+            chain_subgraph.angs=datum.angs[nodes_filter]
+            chain_subgraph.encs=datum.encs[nodes_filter]
+            chain_subgraph.str_seqs=[chr for chr, f in zip(datum.str_seqs, nodes_filter) if f]
+            chain_subgraph.ids = datum.ids
+
+            edge_index, chain_subgraph.edge_distance = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_distance, relabel_nodes=True)
+            _, chain_subgraph.edge_vectors = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_vectors, relabel_nodes=True)
+            _, chain_subgraph.edge_angles = subgraph(nodes_filter, datum.edge_index,
+                        edge_attr=datum.edge_angles, relabel_nodes=True)
+
+            chain_subgraph.edge_index = edge_index
+            chain_subgraph.__num_nodes__ = chain_subgraph.num_nodes = nodes_filter.sum().item()
+            chains.append(chain_subgraph)
+
+        return chains
 
 
     def kd_clamp(self, datum):
@@ -305,22 +338,27 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
 
 def collate_fn(stream):
-    batch = Batch.from_data_list(stream)
-    for key in ('seqs', 'tgt_crds', 'tgt_rots', 'crds', 'bck_crds', 'angs', 'rots', 'chns', 'encs'):
-        if batch[key] is None: continue
-        batch[key], mask = to_dense_batch(batch[key], batch=batch.batch)
-    for key in ('edge_distance', 'edge_angles'):
-        if batch[key] is None: continue
-        batch[key] = to_dense_adj(edge_index=batch.edge_index,
-                                batch=batch.batch, edge_attr=batch[key])
+    batches = [Batch.from_data_list(list(s)) for s in zip(*stream)]
+    for batch in batches:
+        for key in ('seqs', 'tgt_crds', 'tgt_rots', 'crds', 'bck_crds', 'angs', 'rots', 'chns', 'encs'):
+            if key not in batch or batch[key] is None: continue
+            batch[key], mask = to_dense_batch(batch[key], batch=batch.batch)
+        for key in ('edge_distance', 'edge_angles', 'edge_vectors'):
+            if key not in batch or batch[key] is None: continue
+            batch[key] = to_dense_adj(edge_index=batch.edge_index,
+                                    batch=batch.batch, edge_attr=batch[key])
 
-    # used for both models and losses
-    batch.node_pad_mask = mask
-    batch.edge_pad_mask = (mask[:, None, :] & mask[:, :, None])
+        # used for both models and losses
+        batch.node_pad_mask = mask
+        batch.edge_pad_mask = (mask[:, None, :] & mask[:, :, None])
 
-    # used for losses
-    batch.node_record_mask = batch.crds[:, :, 1].norm(dim=-1).gt(1e-6) & batch.crds[:, :, 1, 0].isfinite()
-    batch.angle_record_mask = batch.angs.ne(0.0) & batch.angs.isfinite()
-    batch.edge_record_mask = batch.edge_distance[..., 0].gt(0) & batch.edge_angles[..., 0, :].sum(-1).ne(0)
+        # used for losses
+        batch.node_record_mask = batch.crds[:, :, 1].norm(dim=-1).gt(1e-6) & batch.crds[:, :, 1, 0].isfinite()
+        batch.angle_record_mask = batch.angs.ne(0.0) & batch.angs.isfinite()
+        batch.edge_record_mask = batch.edge_distance[..., 0].gt(0) & batch.edge_angles[..., 0, :].sum(-1).ne(0)
 
-    return batch
+    n, m = [p.encs.size(1) for p in batches]
+    endpoints = repeat(batches[0].tgt_crds, 'b n p s -> b n m p s', m=m), repeat(batches[1].tgt_crds, 'b m c s -> b n m c s', n=n)
+    edge_vectors = torch.einsum('b n m p s, b n p q s -> b n m q s', endpoints[0] - endpoints[1], batches[0].tgt_rots.transpose(-2, -3))
+
+    return (*batches, edge_vectors)

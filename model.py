@@ -22,11 +22,44 @@ class Interactoformer(nn.Module):
         ):
 
         super().__init__()
-        config.checkpoint_denses = 0
 
         self.config = config
+        self.encoder = Encoder(config)
+        self.cross_encoder = CrossEncoder(config)
 
-        self.node_crds_emb = nn.Linear(3, config.dim)
+        self.to_interface = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim], checkpoint=config.checkpoint_denses)
+
+        self.unroll_steps = config.unroll_steps
+        self.eval_steps = config.eval_steps
+
+
+    def forward(self, batch, is_training):
+        output = {}
+
+        pair, edges = batch[:2], batch[2]
+        n, m = [batch.encs.size(1) for batch in pair]
+        b = batch[0].size(0)
+
+        # ====== INDEPENDENT ENCODING ENRICHES NODES ======
+        pair = [self.encoder(batch) for batch in pair]
+
+        # ====== CROSS CAT FOR EDGE PRIOR BELIEF ========
+        p1, p2 = pair
+        cross_cat = repeat(p1.nodes, 'b n h -> b n m h', m=m), repeat(p2.nodes, 'b m h -> b n m h', n=n)
+        cross_cat = torch.cat(cross_cat, dim=-1)
+
+        # ====== MUTUAL ENCODING ENRICHES EXTERNAL EDGES ======
+        output['logit_traj'] = self.cross_encoder(pair, self.to_interface(cross_cat))
+
+        return output
+
+
+class Encoder(nn.Module):
+    def __init__(self,
+            config
+        ):
+        super().__init__()
+        self.config = config
 
         self.sequence_embed = config.sequence_embed
         if config.sequence_embed:
@@ -41,10 +74,6 @@ class Interactoformer(nn.Module):
         self.sidechain_dihedrals_emb = Dense([6 * 12, 6 * 12, 64], checkpoint=config.checkpoint_denses)
         self.dihedral_emb = Dense([128, 128, config.dim], checkpoint=config.checkpoint_denses)
 
-        self.encoder = Encoder(config)
-        self.cross_encoder = CrossEncoder(config)
-        self.docker = Docker(config)
-
         self.distance_pred_number_of_bins = config.distance_pred_number_of_bins
         self.gaussian_noise = config.gaussian_noise
         self.unroll_steps = config.unroll_steps
@@ -56,23 +85,32 @@ class Interactoformer(nn.Module):
 
         edge_enc_size = config.distance_number_of_bins + 3 * config.angle_number_of_bins
         self.to_internal_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim], checkpoint=config.checkpoint_denses)
+        self.layers = nn.ModuleList([
+            IPABlock(
+                dim = config.dim,
+                pairwise_repr_dim = config.edim,
+                heads = config.heads,
+                scalar_key_dim = config.scalar_key_dim,
+                scalar_value_dim = config.scalar_value_dim,
+                point_key_dim = config.point_key_dim,
+                point_value_dim = config.point_value_dim,
+            ) for _ in range(config.encoder_depth)
+        ])
 
-        self.structure_only = config.structure_only
-        if self.structure_only:
-            self.to_external_edge = Dense([edge_enc_size, 2 * edge_enc_size, edge_enc_size, config.edim], checkpoint=config.checkpoint_denses)
-        else:
-            self.to_external_edge = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim], checkpoint=config.checkpoint_denses)
+        self.checkpoint = config.checkpoint_encoder
 
-        self.to_angle = Dense([config.edim, 2 * config.edim, 3 * config.angle_pred_number_of_bins], checkpoint=config.checkpoint_denses)
-        self.to_position = Dense([config.dim, config.dim, 3])
+    def forward_constructor(self, layer):
+        def forward_function(nodes, edges, translations, rotations):
+            nodes = layer(
+                nodes,
+                pairwise_repr = edges,
+                rotations = rotations,
+                translations = translations,
+            )
+            return nodes
+        return forward_function
 
-        self.unroll_steps = config.unroll_steps
-        self.eval_steps = config.eval_steps
-
-
-    def forward(self, batch, is_training):
-        output = {}
-
+    def forward(self, batch):
         node_pad_mask = batch.node_pad_mask
         edge_pad_mask = batch.edge_pad_mask
         batch_size, seq_len = batch.seqs.size()
@@ -102,9 +140,6 @@ class Interactoformer(nn.Module):
 
         # ====== DEFINE EDGES  ======
         edges = torch.zeros(batch_size, seq_len, seq_len, self.config.edim, device=device)
-        internal_edge_mask = rearrange(batch.chns, 'b s -> b () s') == rearrange(batch.chns, 'b s -> b s ()')
-        internal_edge_mask =  internal_edge_mask & edge_pad_mask
-        external_edge_mask = ~internal_edge_mask & edge_pad_mask
 
         # ====== PRODUCE STRUCTURAL SIGNALS  ======
         max_radius = self.config.distance_max_radius
@@ -122,102 +157,15 @@ class Interactoformer(nn.Module):
 
         # ====== BASE INTERNAL EDGES REPRESENTATION  ======
         edge_structural_signal = torch.cat((dist_signal, angle_signal), dim=-1)
-        edges[internal_edge_mask] = self.to_internal_edge(edge_structural_signal[internal_edge_mask])
+        edges = self.to_internal_edge(edge_structural_signal)
 
-        if self.structure_only:
-            # if we are only dealing with structure docking, we give the distogram solution
-            external_edges = self.to_external_edge(edge_structural_signal)
-            edges = edges + external_edges * external_edge_mask[..., None]
-        else:
-
-            # ====== INDEPENDENT ENCODING ENRICHES NODES ======
-            nodes = self.encoder(nodes, edges, batch.bck_crds, batch.rots, internal_edge_mask)
-
-            # ====== MUTUAL ENCODING ENRICHES EXTERNAL EDGES ======
-            cross_encodings, edges, logits_trajectory = self.cross_encoder(
-                nodes, edges, batch.bck_crds, batch.rots,
-                internal_edge_mask,
-                external_edge_mask
-            )
-
-            # output logits for loss
-            output['logit_traj'] = logits_trajectory
-
-        if self.config.distogram_only:
-            return output
-
-
-        # ====== BLACK HOLE INIT ======
-        coors = torch.zeros_like(batch.bck_crds, device=batch.bck_crds.device)
-        rots = repeat(torch.eye(3), '... -> b s ...', b = batch_size, s = seq_len).to(batch.rots.device)
-
-        # ====== GRADIENTLESS FAST FORWARD ======
-        with torch.no_grad():
-            if is_training and self.unroll_steps:
-                batch_steps = torch.randint(0, self.unroll_steps, [batch_size])
-                max_step = torch.max(batch_steps).item()
-                for step in range(max_step):
-                    chosen = batch_steps >= step
-                    _, translations_timeseries, rotations_timeseries = self.docker(
-                        nodes[chosen], edges[chosen], coors[chosen], rots[chosen],
-                        mask=batch.node_pad_mask[chosen]
-                    )
-                    rots[chosen] = rotations_timeseries[-1]
-                    coors[chosen] = translations_timeseries[-1]
-
-        # ====== DOCKING ======
-        translations, rotations  = [ coors ], [ rots ]
-        for _ in range(1 if is_training else self.eval_steps):
-            nodes_, translations_timeseries, rotations_timeseries = self.docker(nodes, edges, coors, rots, mask=batch.node_pad_mask)
-            translations.extend(translations_timeseries)
-            rotations.extend(rotations_timeseries)
-            rots = rotations_timeseries[-1].detach()
-            coors = translations_timeseries[-1].detach()
-
-        output['translations'] = rearrange(torch.stack(translations, dim=0), 't b n e -> b n t e')
-        output['rotations'] = rearrange(torch.stack(rotations, dim=0), 't b n p q -> b n t p q')
-
-        return output
-
-
-class Encoder(nn.Module):
-    def __init__(self,
-            config
-        ):
-        super().__init__()
-
-        self.layers = nn.ModuleList([
-            IPABlock(
-                dim = config.dim,
-                pairwise_repr_dim = config.edim,
-                heads = config.heads,
-                scalar_key_dim = config.scalar_key_dim,
-                scalar_value_dim = config.scalar_value_dim,
-                point_key_dim = config.point_key_dim,
-                point_value_dim = config.point_value_dim,
-            ) for _ in range(config.encoder_depth)
-        ])
-
-        self.checkpoint = config.checkpoint_encoder
-
-    def forward_constructor(self, layer):
-        def forward_function(nodes, edges, translations, rotations, internal_edge_mask):
-            nodes = layer(
-                nodes,
-                pairwise_repr = edges,
-                rotations = rotations,
-                translations = translations,
-                edge_mask = internal_edge_mask
-            )
-            return nodes
-        return forward_function
-
-    def forward(self, nodes, edges, translations, rotations, internal_edge_mask):
         for layer in self.layers:
             forward = self.forward_constructor(layer)
             if self.checkpoint: forward = partial(checkpoint.checkpoint, forward)
-            nodes = forward(nodes, edges, translations, rotations, internal_edge_mask)
-        return nodes
+            nodes = forward(nodes, edges, batch.bck_crds, batch.rots)
+
+        batch.nodes = nodes
+        return batch
 
 
 class CrossEncoder(nn.Module):
@@ -244,17 +192,14 @@ class CrossEncoder(nn.Module):
             for _ in range(config.cross_encoder_depth)
         ])
 
-        binners = []
+        projectors = []
         self.predict_angles = config.predict_angles
 
         for _ in range(config.cross_encoder_depth):
-            to_bins = dict()
-            to_bins['distance'] = Dense([config.edim, config.distance_pred_number_of_bins])
-            if self.predict_angles:
-                to_bins[f'angles'] = Dense([config.edim, 3 * config.angle_pred_number_of_bins])
-            binners.append(nn.ModuleDict(to_bins))
+            to_projection = dict(vector=Dense([config.edim, 3]), error=Dense([config.edim, 1]))
+            projectors.append(nn.ModuleDict(to_projection))
 
-        self.binners = nn.ModuleList(binners)
+        self.projectors = nn.ModuleList(projectors)
         self.checkpoint = config.checkpoint_cross_encoder
         self.predict_angles = config.predict_angles
 
@@ -264,19 +209,20 @@ class CrossEncoder(nn.Module):
             return output
         return forward_function
 
-    def forward(self, nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask):
+    def forward(self, pair, cross_edges):
+
         trajectory = defaultdict(list)
 
-        for (layer, binner) in zip(self.layers, self.binners):
+        for (layer, projector) in zip(self.layers, self.projectors):
             forward = self.forward_constructor(layer)
             if self.checkpoint:
                 forward = partial(checkpoint.checkpoint, forward)
 
-            nodes, edges = forward(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
+            cross_edges = forward(pair, cross_edges)
 
             bins = dict()
-            for (name, binning_function) in binner.items():
-                bins[name] = binning_function(edges)
+            for (name, projection_function) in projector.items():
+                bins[name] = projection_function(cross_edges)
 
             for key, value in bins.items():
                 trajectory[key].append(value)
@@ -284,7 +230,7 @@ class CrossEncoder(nn.Module):
         for key, value in trajectory.items():
             trajectory[key] = torch.stack(value, dim=1)
 
-        return nodes, edges, trajectory
+        return trajectory
 
 class CrossEncoderBlock(nn.Module):
     def __init__(
@@ -320,129 +266,38 @@ class CrossEncoderBlock(nn.Module):
         self.to_edge = Dense([dim, dim, edim])
         self.to_edge_update = Dense2D([edim] + [edim] * num_conv_per_layer, kernel_size)
 
+    def forward(self, pair, cross_edges, **kwargs):
 
-    def forward(self, nodes, edges, translations, rotations,
-                internal_edge_mask, external_edge_mask, **kwargs):
-        attn_input = self.attn_norm(nodes)
+        # for batch in pair:
+        #     attn_input = self.attn_norm(batch.nodes)
+        #     ipa_attn = self.ipa_attn(
+        #         attn_input,
+        #         pairwise_repr = edges,
+        #         rotations = rotations,
+        #         translations = translations,
+        #         edge_mask = internal_edge_mask
+        #     )
 
-        ipa_attn = self.ipa_attn(
-            attn_input,
-            pairwise_repr = edges,
-            rotations = rotations,
-            translations = translations,
-            edge_mask = internal_edge_mask
-        )
+        # attn = self.attn(
+        #     attn_input,
+        #     edge_mask = external_edge_mask
+        # )
+        # nodes = nodes + ipa_attn + attn
+        # nodes = self.ff_norm(nodes)
+        # nodes = self.ff(nodes) + nodes
+        #
+        # endpoints = (repeat(nodes, 'b s c -> b z s c', z=nodes.size(1)),
+        #              repeat(nodes, 'b s c -> b s z c', z=nodes.size(1)))
 
-        attn = self.attn(
-            attn_input,
-            edge_mask = external_edge_mask
-        )
+        # update_mask = external_edge_mask[..., None].float()
+        # external_edges = self.to_edge(endpoints[0] - endpoints[1])
+        # edges = edges + update_mask * external_edges
+        cross_edges = rearrange(cross_edges, 'b s z c -> b c s z')
+        cross_edges = rearrange(self.to_edge_update(cross_edges), 'b c s z -> b s z c')
+        # edge_update = rearrange(edge_update, )
+        # edges = edges + update_mask * external_edges
 
-        nodes = nodes + ipa_attn + attn
-        nodes = self.ff_norm(nodes)
-        nodes = self.ff(nodes) + nodes
-
-        endpoints = (repeat(nodes, 'b s c -> b z s c', z=nodes.size(1)),
-                     repeat(nodes, 'b s c -> b s z c', z=nodes.size(1)))
-
-        update_mask = external_edge_mask[..., None].float()
-        external_edges = self.to_edge(endpoints[0] - endpoints[1])
-        edges = edges + update_mask * external_edges
-
-        edge_update = self.to_edge_update(rearrange(edges, 'b s z c -> b c s z'))
-        edge_update = rearrange(edge_update, 'b c s z -> b s z c')
-        edges = edges + update_mask * external_edges
-
-        return nodes, edges
-
-
-class Docker(nn.Module):
-    def __init__(self,
-            config
-        ):
-        super().__init__()
-
-        self.layers = nn.ModuleList([
-            DockerBlock(
-                dim=config.dim,
-                edim=config.edim,
-                heads=config.heads,
-                scalar_key_dim=config.scalar_key_dim,
-                scalar_value_dim=config.scalar_value_dim,
-                point_key_dim=config.point_key_dim,
-                point_value_dim=config.point_value_dim,
-            )
-            for _ in range(config.docker_depth)
-        ])
-
-        self.checkpoint = config.checkpoint_docker
-
-    def forward_constructor(self, layer):
-        def forward_function(nodes, edges, translations, rotations, mask):
-            nodes, coords, rotations = layer(nodes, edges, translations, rotations, mask)
-            return nodes, coords, rotations
-        return forward_function
-
-    def forward(self, nodes, edges, coors, rotations, mask):
-        trajectory_crds, trajectory_rots  = [], []
-
-        for layer in self.layers:
-            forward = self.forward_constructor(layer)
-            if self.checkpoint:
-                forward = partial(checkpoint.checkpoint, forward)
-
-            nodes, crd_update, rot_update = forward(nodes, edges,
-                                                coors, rotations, mask)
-
-            coors = coors + crd_update
-            rotations = rotations @ rot_update
-
-            trajectory_crds.append(coors)
-            trajectory_rots.append(rotations)
-            rotations = rotations.detach()
-
-        return nodes, trajectory_crds, trajectory_rots
-
-
-class DockerBlock(nn.Module):
-    def __init__(
-            self,
-            dim,
-            edim,
-            heads,scalar_key_dim,
-            scalar_value_dim,
-            point_key_dim,
-            point_value_dim
-        ):
-        super().__init__()
-
-        self.ipa_block = IPABlock(
-            dim = dim,
-            pairwise_repr_dim = edim,
-            heads = heads,
-            scalar_key_dim = scalar_key_dim,
-            scalar_value_dim = scalar_value_dim,
-            point_key_dim = point_key_dim,
-            point_value_dim = point_value_dim,
-        )
-
-        self.projector = nn.Linear(dim, 9)
-
-
-    def forward(self, nodes, edges, coors, rotations, mask):
-        nodes = self.ipa_block(
-            nodes,
-            pairwise_repr = edges,
-            rotations = rotations,
-            translations = coors,
-            mask = mask
-        )
-
-        batch_steps = self.projector(nodes)
-        rot_update, crd_update = batch_steps[..., :6], batch_steps[..., 6:]
-        rot_update = rotation_6d_to_matrix(rot_update)
-        crd_update = einsum('b n c, b n c r -> b n r', crd_update, rotations)
-        return nodes, crd_update, rot_update
+        return cross_edges
 
 
 class Attention(nn.Module):
@@ -482,6 +337,7 @@ class Attention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
 
         return self.to_out(out)
+
 
 
 class Dense2D(nn.Module):
