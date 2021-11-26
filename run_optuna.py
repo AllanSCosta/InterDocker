@@ -19,6 +19,7 @@ import argparse
 from math import floor, ceil
 
 from run import config_parser
+from data import VALIDATION_DATASETS, TRAIN_DATASETS, TEST_DATASETS
 
 with torch.no_grad():
     torch.cuda.empty_cache()
