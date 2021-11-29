@@ -226,28 +226,31 @@ class CrossEncoder(nn.Module):
             config
         ):
         super().__init__()
-
-        self.layers = nn.ModuleList([
-            CrossEncoderBlock(
-                dim = config.dim,
-                edim = config.edim,
-                heads = config.heads,
-                graph_heads = config.graph_heads,
-                scalar_key_dim = config.scalar_key_dim,
-                scalar_value_dim = config.scalar_value_dim,
-                point_key_dim = config.point_key_dim,
-                point_value_dim = config.point_value_dim,
-                graph_head_dim=config.graph_head_dim,
-                kernel_size=config.kernel_size,
-                num_conv_per_layer=config.num_conv_per_layer,
-            )
-            for _ in range(config.cross_encoder_depth)
-        ])
+        if config.cross_encoder_depth == 0:
+            self.layers = [None]
+        else:
+            self.layers = nn.ModuleList([
+                CrossEncoderBlock(
+                    dim = config.dim,
+                    edim = config.edim,
+                    heads = config.heads,
+                    graph_heads = config.graph_heads,
+                    scalar_key_dim = config.scalar_key_dim,
+                    scalar_value_dim = config.scalar_value_dim,
+                    point_key_dim = config.point_key_dim,
+                    point_value_dim = config.point_value_dim,
+                    graph_head_dim=config.graph_head_dim,
+                    kernel_size=config.kernel_size,
+                    num_conv_per_layer=config.num_conv_per_layer,
+                )
+                for _ in range(config.cross_encoder_depth)
+            ])
 
         binners = []
         self.predict_angles = config.predict_angles
 
-        for _ in range(config.cross_encoder_depth):
+        # if depth is 0, just do 1 bin to predict logits
+        for _ in range(min(config.cross_encoder_depth), 1):
             to_bins = dict()
             to_bins['distance'] = Dense([config.edim, config.distance_pred_number_of_bins])
             if self.predict_angles:
@@ -268,11 +271,12 @@ class CrossEncoder(nn.Module):
         trajectory = defaultdict(list)
 
         for (layer, binner) in zip(self.layers, self.binners):
-            forward = self.forward_constructor(layer)
-            if self.checkpoint:
-                forward = partial(checkpoint.checkpoint, forward)
+            if layer is not None:
+                forward = self.forward_constructor(layer)
+                if self.checkpoint:
+                    forward = partial(checkpoint.checkpoint, forward)
 
-            nodes, edges = forward(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
+                nodes, edges = forward(nodes, edges, translations, rotations, internal_edge_mask, external_edge_mask)
 
             bins = dict()
             for (name, binning_function) in binner.items():
