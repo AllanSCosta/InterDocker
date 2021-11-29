@@ -146,7 +146,7 @@ if __name__ == '__main__':
         reinit=True,
         name=config.name,
         config=config,
-        project='InterDocker',
+        project='Interactoformer',
     )
 
     loaders = create_dataloaders(config)

@@ -269,7 +269,7 @@ def submit_script(script_path, base_path, params):
         preamble = f'#!/bin/bash\n'
         preamble += f'#SBATCH --gres=gpu:volta:1\n'
         preamble += f'#SBATCH -o {os.path.join(worskpace_dir, name)}.sh.log\n'
-        preamble += f'#SBATCH --cpus-per-task=20\n'
+        preamble += f'#SBATCH --cpus-per-task=8\n'
         preamble += f'#SBATCH --job-name={name}\n\n'
         preamble += f'module load anaconda/2021b\n'
         file.write(preamble)
