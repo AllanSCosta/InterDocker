@@ -29,7 +29,7 @@ from mp_nerf.mp_nerf_utils import ensure_chirality
 from copy import deepcopy
 
 TRAIN_DATASETS = ['train']
-TEST_DATASETS = ['test']
+TEST_DATASETS = ['DB5']
 VALIDATION_DATASETS = ['val']
 
 DATASETS = TRAIN_DATASETS + VALIDATION_DATASETS + TEST_DATASETS
@@ -54,20 +54,6 @@ def create_dataloaders(config):
         start = time.time()
         data = pickle.load(file)
         print(f'{time.time() - start:.2f} seconds to load dataset')
-
-    num_train_proteins = len(data['train']['seq'])
-    train_filter = torch.rand(num_train_proteins) > config.validation_ratio
-
-    train_idx = (train_filter).float().nonzero().flatten()
-    val_idx = (~train_filter).float().nonzero().flatten()
-
-    train, val = dict(), dict()
-    for key, attribute in data['train'].items():
-        train[key] = list(map(attribute.__getitem__, train_idx))
-        val[key] = list(map(attribute.__getitem__, val_idx))
-
-    data['train'] = train
-    data['val'] = val
 
     loaders = {
         split: ProteinComplexDataset(
@@ -125,6 +111,9 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         self.encs = scn_data_split['enc']
         self.ids = scn_data_split['ids']
 
+        if 'tgt_crd' in scn_data_split:
+            self.tgt_crds = scn_data_split['tgt_crd']
+
         self.split_name = split_name
         self.spatial_clamp = spatial_clamp
         print(f'=============== {split_name} was loaded! {split_name} has size {len(self.str_seqs)} \n')
@@ -140,7 +129,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         datum = ProteinComplexDataset.build_datum(
             self.ids[idx], self.str_seqs[idx],
             self.crds[idx], self.angs[idx],
-            self.chns[idx], self.encs[idx]
+            self.chns[idx], encs=self.encs[idx], tgt_crds=self.tgt_crds[idx] if hasattr(self, 'tgt_crds') else None
         )
 
         datum = deepcopy(datum)
@@ -155,30 +144,32 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         return datum
 
     @classmethod
-    def build_datum(cls, ids, str_seqs, crds, angs, chns, encs=None):
+    def build_datum(cls, ids, str_seqs, crds, angs, chns, encs=None, tgt_crds=None):
         seqs = VOCAB.str2ints(str_seqs, False)
         num_nodes = len(seqs)
 
         chains = torch.LongTensor(chns)
-        chains = rearrange(chains, '(r a) -> r a', a=14)[:, 1]
+        if len(chains.size()) == 2:
+            chains = chains[:, 1]
         if random.random() < 0.5: chains = (chains + 1) % 2
         chains = chains.float() + 1
 
-        crds = torch.FloatTensor(crds).reshape(-1, 14, 3)
-        crds = ensure_chirality(crds.unsqueeze(0)).squeeze(0)
-        tgt_rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
+        has_bound = (tgt_crds is not None)
+        tgt_crds = tgt_crds if has_bound else crds
+        tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3)
+        tgt_crds = ensure_chirality(tgt_crds.unsqueeze(0)).squeeze(0)
+        tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
 
-        backbone_coords = crds[:, 1, :]
-        tgt_crds = backbone_coords.clone()
+        crds = torch.FloatTensor(crds).reshape(-1, 14, 3) if has_bound else tgt_crds
+        tgt_bck_coords = tgt_crds[:, 1, :]
 
-        distance_map = torch.cdist(backbone_coords, backbone_coords)
+        distance_map = torch.cdist(tgt_bck_coords, tgt_bck_coords)
         edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
 
         v, u = edge_index
-        edge_vectors = torch.einsum('b p, b p q -> b q', backbone_coords[u] - backbone_coords[v],
+        edge_vectors = torch.einsum('b p, b p q -> b q', tgt_bck_coords[u] - tgt_bck_coords[v],
                                                          tgt_rots[v].transpose(-1, -2))
         edge_angles = F.normalize(edge_vectors, dim=-1)
-
         # move chains to origin and random rotate
         subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
         crds[chains == 1] = torch.einsum('b a p, p q -> b a q', subunit1, random_rotation().t())
@@ -186,16 +177,16 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         crds[chains == 2] = torch.einsum('b a p, p q -> b a q', subunit2, random_rotation().t())
 
         rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
-        backbone_coords = crds[:, 1, :]
+        bck_coords = crds[:, 1, :]
 
         datum = Data(
             num_nodes=len(seqs),
             __num_nodes__=len(seqs),
             ids=ids,
             crds=crds,
-            tgt_crds=tgt_crds,
+            tgt_crds=tgt_bck_coords,
             tgt_rots=tgt_rots,
-            bck_crds=backbone_coords,
+            bck_crds=bck_coords,
             rots=rots,
             chns=chains,
             seqs=torch.LongTensor(seqs) + 1,

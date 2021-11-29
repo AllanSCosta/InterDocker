@@ -272,7 +272,7 @@ class Trainer():
                 candidate_images.extend([angle_ground, angle_prediction])
 
         # some nice array slicing to fetch images
-        for batch_idx, (chains, id, mask) in enumerate(zip(batch.chns, batch.ids, edge_mask)):
+        for batch_idx, (chains, id, mask) in enumerate(zip(batch.chns, batch.ids, external_edges)):
             images = [img[batch_idx].detach() for img in candidate_images]
             images = [img[mask] for img in images]
             images = [img[:int(len(img)/2)] for img in images]

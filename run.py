@@ -35,7 +35,7 @@ def config_parser():
     parser.add_argument('--dataset_source', type=str, default='../data')
     parser.add_argument('--downsample', type=float, default=1.0)
 
-    parser.add_argument('--spatial_clamp', type=int, default=128) # GPU mem = O(s^2)
+    parser.add_argument('--spatial_clamp', type=int, default=64) # GPU mem = O(s^2)
     parser.add_argument('--max_seq_len', type=int, default=1024) # RAM mem = O(s)
     parser.add_argument('--num_workers', type=int, default=10)
 
@@ -94,9 +94,9 @@ def config_parser():
     parser.add_argument('--distance_pred_max_radius', type=float, default=25)
 
     # OPTIM
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-2)
     parser.add_argument('--accumulate_every', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=25)
+    parser.add_argument('--batch_size', type=int, default=32)
 
     # DISTOGRAM LOSS
     parser.add_argument('--distogram_coefficient', type=float, default=1.0)
