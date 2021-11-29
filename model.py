@@ -250,7 +250,7 @@ class CrossEncoder(nn.Module):
         self.predict_angles = config.predict_angles
 
         # if depth is 0, just do 1 bin to predict logits
-        for _ in range(min(config.cross_encoder_depth), 1):
+        for _ in range(min(config.cross_encoder_depth, 1)):
             to_bins = dict()
             to_bins['distance'] = Dense([config.edim, config.distance_pred_number_of_bins])
             if self.predict_angles:
