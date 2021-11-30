@@ -15,10 +15,7 @@ from utils import submit_script
 
 import argparse
 
-if __name__ == '__main__':
-    with torch.no_grad():
-        torch.cuda.empty_cache()
-
+def config_parser():
     parser = argparse.ArgumentParser(description='Lets bake some magic')
 
     # ========================
@@ -125,7 +122,13 @@ if __name__ == '__main__':
     parser.add_argument('--test_model', type=str, default='-')
     parser.add_argument('--retrain_model', type=str, default='-')
 
+    return parser
 
+if __name__ == '__main__':
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+    
+    parser = config_parser()
     torch.cuda.empty_cache()
 
     config = parser.parse_args()
