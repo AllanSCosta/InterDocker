@@ -161,8 +161,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3)
         tgt_crds = ensure_chirality(tgt_crds.unsqueeze(0)).squeeze(0)
         tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
-
-        crds = torch.FloatTensor(crds).reshape(-1, 14, 3) if has_bound else tgt_crds
+        crds = torch.FloatTensor(crds).reshape(-1, 14, 3) if has_bound else tgt_crds.clone()
         tgt_bck_coords = tgt_crds[:, 1, :]
 
         distance_map = torch.cdist(tgt_bck_coords, tgt_bck_coords)

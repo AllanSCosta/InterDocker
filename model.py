@@ -30,13 +30,16 @@ class Interactoformer(nn.Module):
         self.to_interface = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim], checkpoint=config.checkpoint_denses)
         self.eval_steps = config.eval_steps
 
+        self.cross_unroll = config.cross_unroll
+        self.dock_unroll = config.dock_unroll
+
 
     def forward(self, batch, is_training):
         output = {}
 
         pair, edges = batch[:2], batch[2]
         n, m = [batch.encs.size(1) for batch in pair]
-        b = batch[0].size(0)
+        b = batch[0].encs.size(0)
 
         # ====== INDEPENDENT ENCODING ENRICHES NODES ======
         pair = [self.encoder(batch) for batch in pair]
@@ -46,8 +49,42 @@ class Interactoformer(nn.Module):
         cross_cat = repeat(p1.nodes, 'b n h -> b n m h', m=m), repeat(p2.nodes, 'b m h -> b n m h', n=n)
         cross_cat = torch.cat(cross_cat, dim=-1)
 
-        # ====== MUTUAL ENCODING ENRICHES EXTERNAL EDGES ======
-        output['logit_traj'] = self.cross_encoder(pair, self.to_interface(cross_cat))
+        # ====== MUTUAL ENCODING ITERATIVELY ENRICHES EXTERNAL EDGES ======
+        cross_cat_size = cross_cat.size()[:-1]
+        hypothesis = (
+            torch.zeros((*cross_cat_size, self.config.distance_pred_number_of_bins + 3 * self.config.angle_pred_number_of_bins), device=cross_cat.device)
+        )
+
+        with torch.no_grad():
+            if is_training and self.cross_unroll:
+                batch_steps = torch.randint(0, self.cross_unroll, [b])
+                max_step = torch.max(batch_steps).item()
+                for step in range(max_step):
+                    chosen = batch_steps >= step
+                    internal_trajectory = self.cross_encoder(self.to_interface(cross_cat[chosen]), hypothesis[chosen])
+
+                    distances = F.softmax(internal_trajectory['distance'][-1], dim=-1)
+                    angles = F.softmax(rearrange(internal_trajectory['angles'][-1], '... (a l) -> ... a l', a=3), dim=-1)
+                    solution = (distances, rearrange(angles, '... a l -> ... (a l)'))
+                    hypothesis[chosen] = torch.cat(solution, dim=-1)
+
+        trajectories = defaultdict(list)
+        for _ in range(1 if is_training else self.eval_steps):
+            internal_trajectory = self.cross_encoder(self.to_interface(cross_cat), hypothesis)
+
+            for key, value in internal_trajectory.items():
+                trajectories[key].append(value)
+
+            distances = F.softmax(internal_trajectory['distance'][-1], dim=-1)
+            angles = F.softmax(rearrange(internal_trajectory['angles'][-1], '... (a l) -> ... a l', a=3), dim=-1)
+            solution = (distances, rearrange(angles, '... a l -> ... (a l)'))
+
+            hypothesis = torch.cat(solution, dim=-1).detach()
+
+        for key, value in trajectories.items():
+            trajectories[key] = rearrange(torch.cat(value, dim=0), 't b ... -> b t ...')
+
+        output['logit_traj'] = trajectories
 
         return output
 
@@ -211,22 +248,28 @@ class CrossEncoder(nn.Module):
         self.checkpoint = config.checkpoint_cross_encoder
         self.predict_angles = config.predict_angles
 
+        self.from_dcoords = Dense([config.distance_pred_number_of_bins + 3 * config.angle_pred_number_of_bins, 2 * config.edim, config.edim])
+        self.edge_update = Dense([config.edim, config.edim, config.edim])
+
     def forward_constructor(self, layer):
         def forward_function(*args):
             output = layer(*args)
             return output
         return forward_function
 
-    def forward(self, pair, cross_edges):
+    def forward(self, cross_edges, dcoords):
 
         trajectory = defaultdict(list)
+
+        cross_edges = self.from_dcoords(dcoords) + cross_edges
+        cross_edges = self.edge_update(cross_edges)
 
         for (layer, projector) in zip(self.layers, self.projectors):
             forward = self.forward_constructor(layer)
             if self.checkpoint:
                 forward = partial(checkpoint.checkpoint, forward)
 
-            cross_edges = forward(pair, cross_edges)
+            cross_edges = forward(cross_edges)
 
             bins = dict()
             for (name, projection_function) in projector.items():
@@ -236,7 +279,7 @@ class CrossEncoder(nn.Module):
                 trajectory[key].append(value)
 
         for key, value in trajectory.items():
-            trajectory[key] = torch.stack(value, dim=1)
+            trajectory[key] = torch.stack(value, dim=0)
 
         return trajectory
 
@@ -259,7 +302,6 @@ class CrossEncoderBlock(nn.Module):
         super().__init__()
 
         self.attn_norm = nn.LayerNorm(dim)
-
         self.ipa_attn = InvariantPointAttention(
             dim, heads=heads, scalar_key_dim=scalar_key_dim,
             scalar_value_dim=scalar_value_dim, point_key_dim=point_key_dim,
@@ -276,7 +318,7 @@ class CrossEncoderBlock(nn.Module):
         self.to_edge_update = Dense2D([edim] + [edim] * num_conv_per_layer, kernel_size)
         self.to_edge_update_1d = Dense([edim, edim, edim], kernel_size)
 
-    def forward(self, pair, cross_edges, **kwargs):
+    def forward(self, cross_edges, **kwargs):
 
         # for batch in pair:
         #     attn_input = self.attn_norm(batch.nodes)
@@ -301,9 +343,10 @@ class CrossEncoderBlock(nn.Module):
         # update_mask = external_edge_mask[..., None].float()
         # external_edges = self.to_edge(endpoints[0] - endpoints[1])
         # edges = edges + update_mask * external_edges
-        cross_edges = self.to_edge_update_1d(cross_edges)
-        # cross_edges = rearrange(cross_edges, 'b s z c -> b c s z')
-        # cross_edges = rearrange(self.to_edge_update(cross_edges), 'b c s z -> b s z c')
+        # cross_edges = self.to_edge_update_1d(cross_edges)
+        res = cross_edges
+        cross_edges = rearrange(cross_edges, 'b s z c -> b c s z')
+        cross_edges = rearrange(self.to_edge_update(cross_edges), 'b c s z -> b s z c') + res
         # edge_update = rearrange(edge_update, )
         # edges = edges + update_mask * external_edges
 

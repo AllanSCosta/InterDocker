@@ -192,7 +192,7 @@ class Trainer():
 
             # use ground solution that provides the best cross entropy for distogram loss
             xentropy = cross_entropy(distance_logits, distance_labels, reduction='none', ignore_index=IGNORE_IDX)
-            xentropy = xentropy.sum((1, 2, 4)) / (mask.sum((1, 2, 4)) + 1e-7)
+            xentropy = xentropy.sum((1, 2, 4)) / (mask.sum((1, 2, 4)))
             xentropy, permuted = xentropy.min(dim=-1)
             xentropy = xentropy.mean()
             metrics[f'distance xentropy'] = xentropy
@@ -217,9 +217,8 @@ class Trainer():
             distance_labels = rearrange(distance_labels[..., -1], 'b ... s -> b s ...')[permutation_mask][None, ...]
             ground_images = torch.cat((distance_labels, angles_ground), dim=0)
 
-
-        # if not fetch_images:
-            # return metrics, batch_images, permuted
+        if not fetch_images:
+            return metrics, batch_images, permuted
 
         candidate_images = []
         for dimension_idx in range(predicted_images.size(0)):

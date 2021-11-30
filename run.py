@@ -58,14 +58,14 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_denses', type=int, default=1)
 
     parser.add_argument('--dim', type=int, default=128)
-    parser.add_argument('--edim', type=int, default=64)
+    parser.add_argument('--edim', type=int, default=32)
 
     parser.add_argument('--encoder_depth',type=int, default=5)
-    parser.add_argument('--cross_encoder_depth', type=int, default=1)
+    parser.add_argument('--cross_encoder_depth', type=int, default=4)
     parser.add_argument('--docker_depth', type=int, default=3)
 
     parser.add_argument('--kernel_size', type=int, default=5)
-    parser.add_argument('--num_conv_per_layer', type=int, default=2)
+    parser.add_argument('--num_conv_per_layer', type=int, default=1)
 
     parser.add_argument('--heads', type=int, default=4) # mem, speed = O(heads), O(depth)
     parser.add_argument('--scalar_key_dim',type=int, default=32)
@@ -78,8 +78,8 @@ if __name__ == '__main__':
 
 
     # ITERATION STEPS
-    parser.add_argument('--2d_unroll_steps', type=int, default=20) # O(1) mem
-    parser.add_argument('--3d_unroll_steps', type=int, default=20) # O(1) mem
+    parser.add_argument('--cross_unroll', type=int, default=10) # O(1) mem
+    parser.add_argument('--dock_unroll', type=int, default=20) # O(1) mem
     parser.add_argument('--eval_steps', type=int, default=20)
 
 
@@ -101,7 +101,7 @@ if __name__ == '__main__':
     # OPTIM
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--accumulate_every', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=32)
 
     # DISTOGRAM LOSS
     parser.add_argument('--distogram_coefficient', type=float, default=1.0)
