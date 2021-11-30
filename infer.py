@@ -30,7 +30,7 @@ def load_pdbs(path1, path2):
     for chain_idx, path in enumerate([path1, path2]):
         pdb = parsePDB(path)
         dihedrals, coords, sequence, _, _ = get_seq_coords_and_angles(pdb)
-        chain_labels = torch.full([len(coords)], chain_idx, dtype=int)
+        chain_labels = torch.full([len(sequence)], chain_idx, dtype=int)
         chains['ang'].append(torch.FloatTensor(dihedrals))
         chains['crd'].append(torch.FloatTensor(coords))
         chains['chn'].append(torch.LongTensor(chain_labels))
@@ -38,7 +38,7 @@ def load_pdbs(path1, path2):
 
     (seq1, seq2) = chains['seq']
     chains['seq'] = seq1 + seq2
-    chains['id'] = os.path.basename(args.p1) + '_' + os.path.basename(args.p1)
+    chains['id'] = os.path.basename(args.p1) + '_' + os.path.basename(args.p2)
     chains['ang'] = torch.cat(chains['ang'], dim=0)
     chains['crd'] = torch.cat(chains['crd'], dim=0)
     chains['chn'] = torch.cat(chains['chn'], dim=0)
@@ -52,19 +52,22 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--p1', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_A.pdb')
-    parser.add_argument('--p2', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_B.pdb')
-    parser.add_argument('--model_path', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/models/bipartite-portico')
+    # parser.add_argument('--p1', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_A.pdb')
+    # parser.add_argument('--p2', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/sample_pdb/1mcz_B.pdb')
+
+    parser.add_argument('--p1', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/COVIDMutants/Nanobodies/nanobody_7lx51.pdb')
+    parser.add_argument('--p2', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/COVIDMutants/Nanobodies/rbd_7lx51.pdb')
+    parser.add_argument('--model_path', type=str, default='/home/gridsan/allanc/DNAInteract_shared/allan/models/cool-viaduct')
 
     parser.add_argument('--out_path', type=str, default='./inference/')
 
     parser.add_argument('--cross_encoder_steps', type=int, default=20)
-    parser.add_argument('--docker_steps', type=int, default=30)
+    parser.add_argument('--docker_steps', type=int, default=20)
 
     parser.add_argument('--logits', type=int, default=0)
     parser.add_argument('--timeseries', type=int, default=1)
-    parser.add_argument('--pdb', type=int, default=0)
-    parser.add_argument('--image', type=int, default=0)
+    parser.add_argument('--pdb', type=int, default=1)
+    parser.add_argument('--image', type=int, default=1)
 
     args = parser.parse_args()
 

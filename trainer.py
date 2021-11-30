@@ -58,6 +58,7 @@ class Trainer():
 
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
         self.accumulation = config.accumulate_every
+        self.test_rigid_coords_alignment = True
 
     def train(self):
         for epoch in range(self.config.max_epochs):
@@ -287,9 +288,9 @@ class Trainer():
         metrics = defaultdict(int)
 
         # ======= ITERATE THROUGH BATCH  =======
-        for id, angles, gnd_wrap, pred_traj, chains, mask in zip(batch.ids, batch.angs,
-                                            tgt_crds, traj, batch.chns, node_mask):
-            gnd_wrap, angles, chains = gnd_wrap[mask], angles[mask], chains[mask]
+        for id, angles, gnd_wrap, pred_traj, chains, mask, bck_crds in zip(batch.ids, batch.angs,
+                                            tgt_crds, traj, batch.chns, node_mask, batch.bck_crds):
+            gnd_wrap, angles, chains, bck_crds = gnd_wrap[mask], angles[mask], chains[mask], bck_crds[mask]
 
             # in validation we only evaluate the final step
             pred_traj = pred_traj[-2:-1] if not evaluate_full_trajectory else pred_traj
@@ -297,6 +298,13 @@ class Trainer():
             # ======= ITERATE THROUGH TRAJECTORY  =======
             for step, pred_wrap in enumerate(pred_traj):
                 pred_wrap = pred_wrap[mask]
+
+                if evaluate_full_trajectory and self.test_rigid_coords_alignment:
+                    for chain in (1, 2):
+                        chain_filter = chains == chain
+                        rotation, translation = kabsch_torch(pred_wrap[chain_filter], bck_crds[chain_filter])
+                        pred_wrap[chain_filter] = (translation[None, :] +
+                                torch.einsum('i p , p q -> i q', bck_crds[chain_filter], rotation.t()))
 
                 # ======= DATA IS PROCESSED TO BE LEFT-HANDED  =======
                 rotation, translation = kabsch_torch(pred_wrap, gnd_wrap)

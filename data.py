@@ -156,11 +156,12 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
         has_bound = (tgt_crds is not None)
         tgt_crds = tgt_crds if has_bound else crds
-        tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3)
+        tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3).clone()
         tgt_crds = ensure_chirality(tgt_crds.unsqueeze(0)).squeeze(0)
         tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
-
         crds = torch.FloatTensor(crds).reshape(-1, 14, 3) if has_bound else tgt_crds
+        crds = ensure_chirality(crds.clone().unsqueeze(0)).squeeze(0)
+
         tgt_bck_coords = tgt_crds[:, 1, :]
 
         distance_map = torch.cdist(tgt_bck_coords, tgt_bck_coords)
@@ -242,7 +243,6 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         datum.__num_nodes__ = datum.num_nodes = nodes_filter.sum().item()
 
         return datum
-
 
     def homomeric_augmentation(self, datum):
         # note that symmetry is barely broken when n, m ~= 128 but n, m < 128
