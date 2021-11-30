@@ -31,8 +31,8 @@ def plot_predictions(imgs):
     num_pairs = int(len(imgs)/2)
     fig, axes = plt.subplots(2, num_pairs, figsize=(2 * num_pairs, 4))
     for idx in range(num_pairs):
-        axes[0][idx].imshow(-imgs[2 * idx])
-        axes[1][idx].imshow(-imgs[2 * idx + 1])
+        axes[0][idx].imshow(-imgs[2 * idx], vmax=0)
+        axes[1][idx].imshow(-imgs[2 * idx + 1], vmax=0)
     return fig
 
 

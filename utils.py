@@ -152,9 +152,7 @@ def discretize(measurements, start, end, number_of_bins):
     values = torch.linspace(start, end, number_of_bins + 2)
     step = (values[1] - values[0])
     bins = (values[1:-1]).to(measurements.device)
-    diff = (measurements[..., None] - bins) / step
-    return torch.argmin(torch.abs(diff), dim=-1)
-
+    return torch.argmin(torch.abs((measurements[..., None] - bins) / step), dim=-1)
 
 def soft_one_hot_linspace(x, start, end, number, basis=None, cutoff=None):
     r"""Projection on a basis of functions

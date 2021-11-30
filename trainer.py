@@ -19,6 +19,7 @@ from copy import deepcopy
 from einops import repeat, rearrange
 from torch_geometric.utils.metric import precision, recall
 
+import torch.nn.functional as F
 
 eps = 1e-7
 IGNORE_IDX = -100
@@ -103,7 +104,8 @@ class Trainer():
                         prediction_images) = self.evaluate_predictions(batch, batch_predictions, split_name, batch_idx)
 
                     loss = metrics['loss'] = (
-                        self.config.distogram_coefficient * metrics['fale']
+                        self.config.distogram_coefficient * metrics['distance xentropy'] +
+                        self.config.anglegram_coefficient * metrics['angular xentropy']
                     )
 
                     accumulation += 1
@@ -140,7 +142,7 @@ class Trainer():
 
         # ===== EVALUATE DISTOGRAM PREDICTIONS ======
         if 'logit_traj' in predictions:
-            distogram_metrics, images, permutations = self.evaluate_distograms(
+            distogram_metrics, images, permutations = self.evaluate_vectorgrams(
                 batch,
                 predictions['logit_traj'],
                 should_fetch_results
@@ -152,7 +154,7 @@ class Trainer():
         return metrics, alignments, images
 
 
-    def evaluate_distograms(self, batch, logits_trajectory, fetch_images):
+    def evaluate_vectorgrams(self, batch, logits_trajectory, fetch_images):
         metrics = defaultdict(int)
         batch_images = defaultdict(list)
 
@@ -160,34 +162,69 @@ class Trainer():
         n, m = [p.encs.size(1) for p in pair]
         device = cross_edges_ground.device
 
-        trajectory = logits_trajectory['vector']
+        if self.config.real_value:
+            trajectory = logits_trajectory['vector']
+        else:
+            trajectory = logits_trajectory['distance']
+
         trajectory_len = trajectory.size(1)
         batch_size = trajectory.size(0)
 
         predictions = repeat(trajectory, 'b t n m c -> b n m s t c', s=2)
         targets = repeat(cross_edges_ground, 'b n m c s -> b n m s t c', t=trajectory_len)
-        mask = repeat(pair[0].node_pad_mask, 'b n -> b n m s', m=m, s=2) & repeat(pair[1].node_pad_mask, 'b m -> b n m s', n=n, s=2)
-        mask = mask[..., None] & (torch.norm(targets, dim=-1, p=2) < 20)
+        mask = (repeat(pair[0].node_pad_mask, 'b n -> b n m s t', m=m, s=2, t=trajectory_len)
+              & repeat(pair[1].node_pad_mask, 'b m -> b n m s t', n=n, s=2, t=trajectory_len))
 
-        vector_differences = torch.norm(predictions - targets, dim=-1, p=2)
-        vector_differences = vector_differences * mask.float()
+        if self.config.real_value:
+            vector_differences = torch.norm(predictions - targets, dim=-1, p=2)
+            vector_differences = vector_differences * mask.float()
 
-        vector_differences = vector_differences.sum((1, 2, 4)) / (mask.sum((1, 2, 4)) + 1e-7)
-        vector_differences, permuted = vector_differences.min(dim=-1)
+            vector_differences = vector_differences.sum((1, 2, 4)) / (mask.sum((1, 2, 4)) + 1e-7)
+            vector_differences, permuted = vector_differences.min(dim=-1)
 
-        metrics['fale'] = vector_differences.mean()
+            metrics['fale'] = vector_differences.mean()
+        else:
+            distance_labels = self.binners['distance'](torch.norm(targets, dim=-1, p=2))
+            angle_labels = self.binners['angles'](F.normalize(targets, dim=-1))
 
-        permutation_mask = torch.stack((permuted.bool(), ~(permuted.bool())), dim=-1)
-        ground_images = rearrange(cross_edges_ground, 'b n m c s -> b s c n m')[permutation_mask]
-        predicted_images = rearrange(trajectory, 'b t n m c -> t b c n m')[-1]
+            distance_labels[~mask] = IGNORE_IDX
+            distance_logits = rearrange(predictions, 'b ... l -> b l ...')
 
-        if not fetch_images:
-            return metrics, batch_images, permuted
+            # use ground solution that provides the best cross entropy for distogram loss
+            xentropy = cross_entropy(distance_logits, distance_labels, reduction='none', ignore_index=IGNORE_IDX)
+            xentropy = xentropy.sum((1, 2, 4)) / (mask.sum((1, 2, 4)) + 1e-7)
+            xentropy, permuted = xentropy.min(dim=-1)
+            xentropy = xentropy.mean()
+            metrics[f'distance xentropy'] = xentropy
+
+            permutation_mask = torch.stack((permuted.bool(), ~(permuted.bool())), dim=-1)
+            mask = rearrange(mask, 'b n m s t -> b s t n m ')[permutation_mask]
+
+            if self.predict_angles:
+                angles_ground = rearrange(angle_labels, 'b ... s t a -> b s t ... a')
+                angles_ground = angles_ground[permutation_mask]
+                angles_logits = rearrange(logits_trajectory['angles'], 'b ... (a l) -> b l ... a', a=3)
+                angles_ground[~mask] = IGNORE_IDX
+                angles_ground[rearrange(distance_labels, 'b ... s t -> b s t ...')[permutation_mask] == self.config.distance_pred_number_of_bins - 1] = IGNORE_IDX
+                angular_xentropy = cross_entropy(angles_logits, angles_ground, ignore_index=IGNORE_IDX)
+                metrics[f'angular xentropy'] = angular_xentropy
+
+            terminal_logits = rearrange(distance_logits[..., -1], 'b l ... s -> b s ... l')[permutation_mask]
+            final_dist_pred = logit_expectation(terminal_logits)[None, ...]
+            final_angle_pred = logit_expectation(rearrange(angles_logits[:, :, -1], 'b l ... c -> c b ... l'))
+            predicted_images = torch.cat((final_dist_pred, final_angle_pred), dim=0)
+            angles_ground = rearrange(angles_ground[:, -1], 'b ... s -> s b ...')
+            distance_labels = rearrange(distance_labels[..., -1], 'b ... s -> b s ...')[permutation_mask][None, ...]
+            ground_images = torch.cat((distance_labels, angles_ground), dim=0)
+
+
+        # if not fetch_images:
+            # return metrics, batch_images, permuted
 
         candidate_images = []
-        for dimension_idx in range(3):
-            pred_img = predicted_images[:, dimension_idx]
-            grnd_img = ground_images[:, dimension_idx]
+        for dimension_idx in range(predicted_images.size(0)):
+            pred_img = predicted_images[dimension_idx]
+            grnd_img = ground_images[dimension_idx]
             candidate_images.extend([grnd_img, pred_img])
 
         for batch_idx, (chains1, chains2, id) in enumerate(zip(pair[0].chns, pair[1].chns, pair[0].ids)):

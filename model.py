@@ -28,8 +28,6 @@ class Interactoformer(nn.Module):
         self.cross_encoder = CrossEncoder(config)
 
         self.to_interface = Dense([2 * config.dim, 2 * config.dim, config.dim, config.edim], checkpoint=config.checkpoint_denses)
-
-        self.unroll_steps = config.unroll_steps
         self.eval_steps = config.eval_steps
 
 
@@ -76,7 +74,6 @@ class Encoder(nn.Module):
 
         self.distance_pred_number_of_bins = config.distance_pred_number_of_bins
         self.gaussian_noise = config.gaussian_noise
-        self.unroll_steps = config.unroll_steps
 
         self.edge_norm_enc = partial(soft_one_hot_linspace, start=2,
                     end=config.distance_max_radius, number=config.distance_number_of_bins, basis='gaussian', cutoff=True)
@@ -100,12 +97,13 @@ class Encoder(nn.Module):
         self.checkpoint = config.checkpoint_encoder
 
     def forward_constructor(self, layer):
-        def forward_function(nodes, edges, translations, rotations):
+        def forward_function(nodes, edges, translations, rotations, edge_mask):
             nodes = layer(
                 nodes,
                 pairwise_repr = edges,
                 rotations = rotations,
                 translations = translations,
+                edge_mask=edge_mask,
             )
             return nodes
         return forward_function
@@ -162,7 +160,7 @@ class Encoder(nn.Module):
         for layer in self.layers:
             forward = self.forward_constructor(layer)
             if self.checkpoint: forward = partial(checkpoint.checkpoint, forward)
-            nodes = forward(nodes, edges, batch.bck_crds, batch.rots)
+            nodes = forward(nodes, edges, batch.bck_crds, batch.rots, edge_pad_mask)
 
         batch.nodes = nodes
         return batch
@@ -192,14 +190,24 @@ class CrossEncoder(nn.Module):
             for _ in range(config.cross_encoder_depth)
         ])
 
-        projectors = []
         self.predict_angles = config.predict_angles
 
-        for _ in range(config.cross_encoder_depth):
-            to_projection = dict(vector=Dense([config.edim, 3]), error=Dense([config.edim, 1]))
-            projectors.append(nn.ModuleDict(to_projection))
+        if config.real_value:
+            projectors = []
+            for _ in range(config.cross_encoder_depth):
+                to_projection = dict(vector=Dense([config.edim, 1]), error=Dense([config.edim, 1]))
+                projectors.append(nn.ModuleDict(to_projection))
+            self.projectors = nn.ModuleList(projectors)
+        else:
+            binners = []
+            for _ in range(config.cross_encoder_depth):
+                to_bins = dict()
+                to_bins['distance'] = Dense([config.edim, config.distance_pred_number_of_bins])
+                if self.predict_angles:
+                    to_bins[f'angles'] = Dense([config.edim, 3 * config.angle_pred_number_of_bins])
+                binners.append(nn.ModuleDict(to_bins))
+            self.projectors = nn.ModuleList(binners)
 
-        self.projectors = nn.ModuleList(projectors)
         self.checkpoint = config.checkpoint_cross_encoder
         self.predict_angles = config.predict_angles
 
@@ -262,9 +270,11 @@ class CrossEncoderBlock(nn.Module):
 
         self.ff_norm = nn.LayerNorm(dim)
         self.ff = Dense([dim, dim])
+        self.edges_norm = nn.LayerNorm(edim)
 
         self.to_edge = Dense([dim, dim, edim])
         self.to_edge_update = Dense2D([edim] + [edim] * num_conv_per_layer, kernel_size)
+        self.to_edge_update_1d = Dense([edim, edim, edim], kernel_size)
 
     def forward(self, pair, cross_edges, **kwargs):
 
@@ -283,7 +293,6 @@ class CrossEncoderBlock(nn.Module):
         #     edge_mask = external_edge_mask
         # )
         # nodes = nodes + ipa_attn + attn
-        # nodes = self.ff_norm(nodes)
         # nodes = self.ff(nodes) + nodes
         #
         # endpoints = (repeat(nodes, 'b s c -> b z s c', z=nodes.size(1)),
@@ -292,8 +301,9 @@ class CrossEncoderBlock(nn.Module):
         # update_mask = external_edge_mask[..., None].float()
         # external_edges = self.to_edge(endpoints[0] - endpoints[1])
         # edges = edges + update_mask * external_edges
-        cross_edges = rearrange(cross_edges, 'b s z c -> b c s z')
-        cross_edges = rearrange(self.to_edge_update(cross_edges), 'b c s z -> b s z c')
+        cross_edges = self.to_edge_update_1d(cross_edges)
+        # cross_edges = rearrange(cross_edges, 'b s z c -> b c s z')
+        # cross_edges = rearrange(self.to_edge_update(cross_edges), 'b c s z -> b s z c')
         # edge_update = rearrange(edge_update, )
         # edges = edges + update_mask * external_edges
 
@@ -337,7 +347,6 @@ class Attention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
 
         return self.to_out(out)
-
 
 
 class Dense2D(nn.Module):
