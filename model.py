@@ -78,7 +78,8 @@ class Interactoformer(nn.Module):
 
         trajectories = defaultdict(list)
         for _ in range(1 if is_training else self.eval_steps):
-            internal_trajectory = self.cross_encoder(self.to_interface(cross_cat), hypothesis)
+            softmaxed_hypotheses = {key: F.softmax(value, dim=-1) for key, value in hypothesis.items()}
+            internal_trajectory = self.cross_encoder(self.to_interface(cross_cat), softmaxed_hypotheses)
 
             for key, value in internal_trajectory.items():
                 trajectories[key].extend(value)
