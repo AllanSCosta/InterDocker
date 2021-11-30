@@ -80,7 +80,7 @@ if __name__ == '__main__':
     # ITERATION STEPS
     parser.add_argument('--cross_unroll', type=int, default=10) # O(1) mem
     parser.add_argument('--dock_unroll', type=int, default=20) # O(1) mem
-    parser.add_argument('--eval_steps', type=int, default=20)
+    parser.add_argument('--eval_steps', type=int, default=10)
 
 
     # ========================

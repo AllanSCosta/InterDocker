@@ -32,6 +32,7 @@ class Interactoformer(nn.Module):
 
         self.cross_unroll = config.cross_unroll
         self.dock_unroll = config.dock_unroll
+        self.stochastic_embed = Dense([config.dim, config.dim, config.dim])
 
 
     def forward(self, batch, is_training):
@@ -44,9 +45,12 @@ class Interactoformer(nn.Module):
         # ====== INDEPENDENT ENCODING ENRICHES NODES ======
         pair = [self.encoder(batch) for batch in pair]
 
-        # ====== CROSS CAT FOR EDGE PRIOR BELIEF ========
+        # ====== ADD STOCHASTICITY TO CROSS =======
         p1, p2 = pair
-        cross_cat = repeat(p1.nodes, 'b n h -> b n m h', m=m), repeat(p2.nodes, 'b m h -> b n m h', n=n)
+        s = [self.stochastic_embed(torch.randn(nodes.size(), device=nodes.device)) for nodes in (p1.nodes, p2.nodes)]
+
+        # ====== CROSS CAT FOR EDGE PRIOR BELIEF ========
+        cross_cat = repeat(p1.nodes + s[0], 'b n h -> b n m h', m=m), repeat(p2.nodes + s[1], 'b m h -> b n m h', n=n)
         cross_cat = torch.cat(cross_cat, dim=-1)
 
         # ====== MUTUAL ENCODING ITERATIVELY ENRICHES EXTERNAL EDGES ======
@@ -61,12 +65,17 @@ class Interactoformer(nn.Module):
                 max_step = torch.max(batch_steps).item()
                 for step in range(max_step):
                     chosen = batch_steps >= step
+
                     internal_trajectory = self.cross_encoder(self.to_interface(cross_cat[chosen]), hypothesis[chosen])
 
-                    distances = F.softmax(internal_trajectory['distance'][-1], dim=-1)
+                    distances = internal_trajectory['distance'][-1]
                     angles = F.softmax(rearrange(internal_trajectory['angles'][-1], '... (a l) -> ... a l', a=3), dim=-1)
                     solution = (distances, rearrange(angles, '... a l -> ... (a l)'))
-                    hypothesis[chosen] = torch.cat(solution, dim=-1)
+
+
+                    hypothesis[chosen] = hypothesis[chosen] + torch.cat(solution, dim=-1)
+
+
 
         trajectories = defaultdict(list)
         for _ in range(1 if is_training else self.eval_steps):
@@ -79,7 +88,7 @@ class Interactoformer(nn.Module):
             angles = F.softmax(rearrange(internal_trajectory['angles'][-1], '... (a l) -> ... a l', a=3), dim=-1)
             solution = (distances, rearrange(angles, '... a l -> ... (a l)'))
 
-            hypothesis = torch.cat(solution, dim=-1).detach()
+            hypothesis = hypothesis + torch.cat(solution, dim=-1).detach()
 
         for key, value in trajectories.items():
             trajectories[key] = rearrange(torch.cat(value, dim=0), 't b ... -> b t ...')
