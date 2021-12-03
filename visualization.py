@@ -28,11 +28,15 @@ plt.rcParams.update({
 
 
 def plot_predictions(imgs):
-    num_pairs = int(len(imgs)/2)
+    num_pairs = (int(len(imgs)/2))
     fig, axes = plt.subplots(2, num_pairs, figsize=(2 * num_pairs, 4))
-    for idx in range(num_pairs):
-        axes[0][idx].imshow(-imgs[2 * idx], vmax=0)
-        axes[1][idx].imshow(-imgs[2 * idx + 1], vmax=0)
+    if num_pairs == 1:
+        axes[0].imshow(-imgs[0], vmax=0)
+        axes[1].imshow(-imgs[1], vmax=0)
+    else:
+        for idx in range(num_pairs):
+            axes[0][idx].imshow(-imgs[2 * idx])
+            axes[1][idx].imshow(-imgs[2 * idx + 1])
     return fig
 
 
@@ -117,5 +121,5 @@ def plot_aligned_timeseries(seq, timeseries, boundary):
     view.setStyle({'model': -1, 'resi': [f'{len(gnd_crd) + boundary + 1}-{2 * len(gnd_crd)}']}, {'cartoon': {'color': pred_colors[1]}})
 
     view.zoomTo()
-    view.animate({'loop': "forward"})
+    if len(timeseries) > 1: view.animate({'loop': "forward"})
     return view

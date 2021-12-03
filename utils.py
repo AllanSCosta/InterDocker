@@ -149,10 +149,9 @@ def drmsd_torch(pred_translations, true_translations, edge_index,
     return drmsd
 
 def discretize(measurements, start, end, number_of_bins):
-    values = torch.linspace(start, end, number_of_bins + 2)
-    step = (values[1] - values[0])
-    bins = (values[1:-1]).to(measurements.device)
-    return torch.argmin(torch.abs((measurements[..., None] - bins) / step), dim=-1)
+    stretch = end - start
+    labels = torch.round((torch.clamp(measurements, min=start, max=end) - start) * stretch / number_of_bins).long()
+    return labels
 
 def soft_one_hot_linspace(x, start, end, number, basis=None, cutoff=None):
     r"""Projection on a basis of functions

@@ -35,18 +35,17 @@ class Interactoformer(nn.Module):
         self.stochastic_embed = Dense([config.dim, config.dim, config.dim])
 
 
-    def forward(self, batch, is_training):
+    def forward(self, batch_pair, is_training):
         output = {}
 
-        pair, edges = batch[:2], batch[2]
-        n, m = [batch.encs.size(1) for batch in pair]
-        b = batch[0].encs.size(0)
+        n, m = [batch.encs.size(1) for batch in batch_pair]
+        b = batch_pair[0].encs.size(0)
 
         # ====== INDEPENDENT ENCODING ENRICHES NODES ======
-        pair = [self.encoder(batch) for batch in pair]
+        batch_pair = [self.encoder(batch) for batch in batch_pair]
 
         # ====== ADD STOCHASTICITY TO CROSS =======
-        p1, p2 = pair
+        p1, p2 = batch_pair
         s = [self.stochastic_embed(torch.randn(nodes.size(), device=nodes.device)) for nodes in (p1.nodes, p2.nodes)]
 
         # ====== CROSS CAT FOR EDGE PRIOR BELIEF ========
@@ -54,50 +53,9 @@ class Interactoformer(nn.Module):
         cross_cat = torch.cat(cross_cat, dim=-1)
 
         # ====== MUTUAL ENCODING ITERATIVELY ENRICHES EXTERNAL EDGES ======
-        cross_cat_size = cross_cat.size()[:-1]
-        hypothesis = dict(
-            distance=torch.zeros((*cross_cat_size, self.config.distance_pred_number_of_bins), device=cross_cat.device),
-            angle_x=torch.zeros((*cross_cat_size,  self.config.angle_pred_number_of_bins), device=cross_cat.device),
-            angle_y=torch.zeros((*cross_cat_size,  self.config.angle_pred_number_of_bins), device=cross_cat.device),
-            angle_z=torch.zeros((*cross_cat_size,  self.config.angle_pred_number_of_bins), device=cross_cat.device),
-        )
+        predictions = self.cross_encoder(self.to_interface(cross_cat))
 
-        with torch.no_grad():
-            if is_training and self.cross_unroll:
-                batch_steps = torch.randint(0, self.cross_unroll, [b])
-                max_step = torch.max(batch_steps).item()
-                for step in range(max_step):
-                    chosen = batch_steps >= step
-
-                    chosen_hypotheses = {key: F.softmax(value[chosen], dim=-1) for key, value in hypothesis.items()}
-                    internal_trajectory = self.cross_encoder(self.to_interface(cross_cat[chosen]), chosen_hypotheses)
-
-                    for key, logit_update in internal_trajectory.items():
-                        hypothesis[key][chosen] = internal_trajectory[key][-1]
-
-
-        trajectories = defaultdict(list)
-        for _ in range(1 if is_training else self.eval_steps):
-            softmaxed_hypotheses = {key: F.softmax(value, dim=-1) for key, value in hypothesis.items()}
-            internal_trajectory = self.cross_encoder(self.to_interface(cross_cat), softmaxed_hypotheses)
-
-            for key, value in internal_trajectory.items():
-                trajectories[key].extend(value)
-                hypothesis[key] = internal_trajectory[key][-1].detach()
-
-        for key, lst in trajectories.items():
-            trajectories[key] = torch.stack(lst, dim=1)
-
-        if 'angle_x' in trajectories:
-            trajectories['angles'] = torch.cat(
-                (trajectories['angle_x'], trajectories['angle_y'], trajectories['angle_z']),
-            dim=-1)
-            del trajectories['angle_x']
-            del trajectories['angle_y']
-            del trajectories['angle_z']
-
-        output['logit_traj'] = trajectories
-        return output
+        return predictions
 
 
 class Encoder(nn.Module):
@@ -199,7 +157,6 @@ class Encoder(nn.Module):
         dist_signal = self.edge_norm_enc(edge_distance)
         angle_signal = self.edge_angle_enc(edge_angles)
         angle_signal = rearrange(angle_signal, 'b s z a c -> b s z (a c)')
-        angle_signal[edge_distance < max_radius] = 0
 
         # ====== BASE INTERNAL EDGES REPRESENTATION  ======
         edge_structural_signal = torch.cat((dist_signal, angle_signal), dim=-1)
@@ -208,7 +165,7 @@ class Encoder(nn.Module):
         for layer in self.layers:
             forward = self.forward_constructor(layer)
             if self.checkpoint: forward = partial(checkpoint.checkpoint, forward)
-            nodes = forward(nodes, edges, batch.bck_crds, batch.rots, edge_pad_mask)
+            nodes = forward(nodes, edges, batch.bck_crds, batch.rots, edge_pad_mask & (edge_distance < max_radius))
 
         batch.nodes = nodes
         return batch
@@ -240,10 +197,10 @@ class CrossEncoder(nn.Module):
 
         self.predict_angles = config.predict_angles
 
-        if config.real_value:
+        if True:
             projectors = []
             for _ in range(config.cross_encoder_depth):
-                to_projection = dict(vector=Dense([config.edim, 1]), error=Dense([config.edim, 1]))
+                to_projection = dict(rotation=Dense([config.edim, config.edim, 6]), translation=Dense([config.edim, 3]), distance=Dense([config.edim,1]), score=Dense([config.edim, 1]))
                 projectors.append(nn.ModuleDict(to_projection))
             self.projectors = nn.ModuleList(projectors)
         else:
@@ -252,14 +209,12 @@ class CrossEncoder(nn.Module):
                 to_bins = dict()
                 to_bins['distance'] = Dense([config.edim, config.distance_pred_number_of_bins])
                 if self.predict_angles:
-                    for angle in ('x', 'y', 'z'):
-                        to_bins[f'angle_{angle}'] = Dense([config.edim, config.angle_pred_number_of_bins])
+                    to_bins[f'angles'] = Dense([config.edim, 3 * config.angle_pred_number_of_bins])
                 binners.append(nn.ModuleDict(to_bins))
             self.projectors = nn.ModuleList(binners)
 
         self.checkpoint = config.checkpoint_cross_encoder
         self.predict_angles = config.predict_angles
-        self.edge_update = Dense([config.edim, config.edim, config.edim])
 
     def forward_constructor(self, layer):
         def forward_function(*args):
@@ -267,7 +222,7 @@ class CrossEncoder(nn.Module):
             return output
         return forward_function
 
-    def forward(self, cross_edges, hypothesis):
+    def forward(self, cross_edges):
         trajectory = defaultdict(list)
 
         for (layer, projector) in zip(self.layers, self.projectors):
@@ -279,13 +234,13 @@ class CrossEncoder(nn.Module):
 
             bins = dict()
             for (name, projection_function) in projector.items():
-                bins[name] = projection_function(cross_edges) + hypothesis[name]
+                bins[name] = projection_function(cross_edges)
 
             for key, value in bins.items():
                 trajectory[key].append(value)
 
         for key, value in trajectory.items():
-            trajectory[key] = torch.stack(value, dim=0)
+            trajectory[key] = torch.stack(value, dim=1)
 
         return trajectory
 
@@ -361,7 +316,7 @@ class Attention(nn.Module):
         if edge_mask is not None:
             max_neg_value = -torch.finfo(sim.dtype).max
             edge_mask = repeat(edge_mask, 'b i j -> (b h) i j', h = h)
-            sim.masked_fill_(~edge_mask, max_neg_value)
+            sim = sim.masked_fill_(~edge_mask, max_neg_value)
 
         attn = sim.softmax(dim = -1)
         out = einsum('b i j, b i j d -> b i d', attn, v)
@@ -378,7 +333,7 @@ class Dense2D(nn.Module):
                                             layer_structure[1:])):
             layers.append(nn.Conv2d(back, front, kernel_size=kernel_size, padding='same'))
             layers.append(nn.BatchNorm2d(front))
-            if idx < len(layer_structure) - 2: layers.append(nn.LeakyReLU())
+            if idx < len(layer_structure) - 1: layers.append(nn.LeakyReLU())
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):

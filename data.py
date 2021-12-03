@@ -31,7 +31,7 @@ from copy import deepcopy
 
 TRAIN_DATASETS = ['train']
 TEST_DATASETS = ['DB5']
-VALIDATION_DATASETS = ['val']
+VALIDATION_DATASETS = ['val']#'val']
 
 DATASETS = TRAIN_DATASETS + VALIDATION_DATASETS + TEST_DATASETS
 
@@ -127,6 +127,10 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         new_idx = random.randint(0, len(self)-1)
 
+        if len(self.chns[idx]) != len(self.str_seqs[idx]):
+            print('EEEEOTA POHA')
+            return self[new_idx]
+
         datum = ProteinComplexDataset.build_datum(
             self.ids[idx], self.str_seqs[idx],
             self.crds[idx], self.angs[idx],
@@ -158,7 +162,7 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
 
         has_bound = (tgt_crds is not None)
         tgt_crds = tgt_crds if has_bound else crds
-        tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3)
+        tgt_crds = torch.FloatTensor(tgt_crds).reshape(-1, 14, 3).clone()
         tgt_crds = ensure_chirality(tgt_crds.unsqueeze(0)).squeeze(0)
         tgt_rots = rot_matrix(tgt_crds[:, 0], tgt_crds[:, 1], tgt_crds[:, 2])
         crds = torch.FloatTensor(crds).reshape(-1, 14, 3) if has_bound else tgt_crds.clone()
@@ -168,16 +172,18 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
         edge_index = torch.nonzero(torch.ones(num_nodes, num_nodes)).t()
 
         v, u = edge_index
-        edge_vectors = torch.einsum('b p, b p q -> b q', tgt_bck_coords[u] - tgt_bck_coords[v],
-                                                         tgt_rots[v].transpose(-1, -2))
+        edge_vectors = torch.einsum('n w, n w l -> n l', tgt_bck_coords[u] - tgt_bck_coords[v],
+                                                               tgt_rots[v])
         edge_angles = F.normalize(edge_vectors, dim=-1)
         # move chains to origin and random rotate
-        subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
-        crds[chains == 1] = torch.einsum('b a p, p q -> b a q', subunit1, random_rotation().t())
-        subunit2 = crds[chains == 2] - crds[chains == 2].mean(dim=-3)
-        crds[chains == 2] = torch.einsum('b a p, p q -> b a q', subunit2, random_rotation().t())
+        # subunit1 = crds[chains == 1] - crds[chains == 1].mean(dim=-3)
+        # crds[chains == 1] = torch.einsum('b a p, p q -> b a q', subunit1, random_rotation().t())
 
-        rots = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])
+        subunit2 = crds[chains == 2] - crds[chains == 2].mean(dim=-3)
+        crds[chains == 2] = torch.einsum('b a w, w l -> b a l', subunit2, random_rotation().t())
+
+        rots = tgt_rots.clone()
+        rots[chains == 2] = rot_matrix(crds[:, 0], crds[:, 1], crds[:, 2])[chains == 2]
         bck_coords = crds[:, 1, :]
 
         datum = Data(
@@ -301,8 +307,8 @@ class ProteinComplexDataset(torch.utils.data.Dataset):
             datum.tgt_rots = torch.stack((datum.tgt_rots, alternate_rots), dim=-1)
 
             v, u = datum.edge_index
-            alternate_edge_vectors = torch.einsum('b p, b p q -> b q', alternate_crds[u] - alternate_crds[v],
-                                                             alternate_rots[v].transpose(-1, -2))
+            alternate_edge_vectors = torch.einsum('b w, b w l -> b l', alternate_crds[u] - alternate_crds[v],
+                                                                        alternate_rots[v])
             alternate_edge_angles = F.normalize(alternate_edge_vectors, dim=-1)
             datum.edge_angles = torch.stack((datum.edge_angles, alternate_edge_angles), dim=-2)
 
@@ -357,7 +363,33 @@ def collate_fn(stream):
         batch.edge_record_mask = batch.edge_distance[..., 0].gt(0) & batch.edge_angles[..., 0, :].sum(-1).ne(0)
 
     n, m = [p.encs.size(1) for p in batches]
-    endpoints = repeat(batches[0].tgt_crds, 'b n p s -> b n m p s', m=m), repeat(batches[1].tgt_crds, 'b m c s -> b n m c s', n=n)
-    edge_vectors = torch.einsum('b n m p s, b n p q s -> b n m q s', endpoints[0] - endpoints[1], batches[0].tgt_rots.transpose(-2, -3))
 
-    return (*batches, edge_vectors)
+    coords_endpoints = repeat(batches[0].tgt_crds, 'b n p s -> b n m p s', m=m), repeat(batches[1].tgt_crds, 'b m c s -> b n m c s', n=n)
+    rotation_endpoints = repeat(batches[0].tgt_rots, 'b n ... -> b n m ...', m=m), repeat(batches[1].tgt_rots, 'b m ... -> b n m ...', n=n)
+    rotation_endpoints = [rearrange(e, '... p q s -> ... s p q') for e in rotation_endpoints]
+    # mask = (repeat(batches[0].tgt_crds, 'b n p s -> b n m p s', m=m).sum(-2).gt(0)) & (repeat(batches[1].tgt_crds, 'b m c s -> b n m c s', n=n).sum(-2).gt(0))
+
+    rotation_differences = torch.einsum('... w l, ... w r -> ... l r', rotation_endpoints[0], rotation_endpoints[1])
+    recovery = torch.einsum('... l r, ... w l -> ... w r', rotation_differences, rotation_endpoints[0])
+
+    edge_vectors = torch.einsum('... w s, ... s w l -> ... l s', coords_endpoints[1] - coords_endpoints[0], rotation_endpoints[0])
+
+    # breakpoint()
+    #
+    # rotation_diff, translation_diff = rotation_differences[..., 0, :, :], edge_vectors[..., 0]
+    # ligand_rotations = torch.einsum('...l r, ... w l -> ... w r', rotation_diff, rotation_endpoints[0][..., 0, :, :])
+    # assert torch.mean(ligand_rotations - rotation_endpoints[1][..., 0, :, :]) < 0.0001
+    #
+    # anchor_displacement = torch.einsum('b n m l, b n m w l -> b n m w', translation_diff, rotation_endpoints[0][..., 0, :, :])
+    # anchor_coords = anchor_displacement + coords_endpoints[0][..., 0]
+    #
+    # assert torch.mean(torch.abs(anchor_coords - coords_endpoints[1][..., 0])) < 0.001
+    #
+    # extended_coords = torch.einsum('b m k r, b n m w r -> b n m k w', batches[1].edge_vectors, ligand_rotations) + repeat(anchor_coords, '... w -> ... m w', m=m)
+    #
+    # assert torch.mean((extended_coords - repeat(anchor_coords, '... w -> ... m w', m=m).transpose(-2, -3))) < 0.001
+
+    # recovered_positions = torch.einsum('... l s, ... s w l -> ... w s', edge_vectors, rotation_endpoints[0]) + coords_endpoints[0]
+
+
+    return (batches, edge_vectors, rotation_differences)
