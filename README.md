@@ -10,6 +10,17 @@
 
 <img src="media/interdocker-high-level.jpg" height="350"/>
 
+## Encoding
+<img src="media/encoding.png" height="350"/>
+
+
+## Cross-Encoding
+<img src="media/cross_encoding.png" height="350"/>
+
+## Docking
+<img src="media/docking.png" height="350"/>
+
+
 ### Dependencies
 
 This repository integrates a number of codebases into a protein-protein docking system.
