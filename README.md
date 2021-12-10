@@ -10,6 +10,12 @@
 
 <img src="media/interdocker-high-level.jpg" height="350"/>
 
+Documentation coming soon!
+
+[Poster: Learning Meaningful Representations of Life](https://docs.google.com/presentation/d/1HZvqq-UFH6fLgHYkFXhT5a2EmJY8kc5t4rKBYgEnXiw/edit?usp=sharing)
+
+
+
 ## Encoding
 <img src="media/encoding.png" height="350"/>
 
